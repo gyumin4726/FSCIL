@@ -11,7 +11,7 @@ inc_step = 10
 model = dict(backbone=dict(_delete_=True,
                            type='VMambaBackbone',
                            model_name='vmamba_tiny_s1l8',  # VMamba Tiny model name for MambaNeck
-                           pretrained_path='./vssm1_tiny_0230s_ckpt_epoch_264.pth',  # VMamba Tiny pretrained weights
+                           pretrained_path='mamba/FSCIL/vssm1_tiny_0230s_ckpt_epoch_264.pth',  # VMamba Tiny s2l5 pretrained weights
                            out_indices=(0, 1, 2, 3),  # Extract features from all 4 stages
                            frozen_stages=1,  # Freeze patch embedding and first stage
                            channel_first=True),
@@ -67,15 +67,41 @@ augmented_pipeline = [
 ]
 
 # 증강 이미지용 파이프라인
-augmented_pipeline4 = [
+augmented_pipeline1 = [
     dict(type='LoadAugmentedImage',
-         aug_dir='data/CUB_200_2011/augmented_images_patch_4'),
+         aug_dir='data/CUB_200_2011/augmented_images_1'),
     dict(type='Normalize', **img_norm_cfg),
     dict(type='ImageToTensor', keys=['img']),
     dict(type='ToTensor', keys=['gt_label']),
     dict(type='Collect', keys=['img', 'gt_label'], meta_keys=meta_keys)
 ]
-
+# 증강 이미지용 파이프라인
+augmented_pipeline2= [
+    dict(type='LoadAugmentedImage',
+         aug_dir='data/CUB_200_2011/augmented_images_2'),
+    dict(type='Normalize', **img_norm_cfg),
+    dict(type='ImageToTensor', keys=['img']),
+    dict(type='ToTensor', keys=['gt_label']),
+    dict(type='Collect', keys=['img', 'gt_label'], meta_keys=meta_keys)
+]
+# 증강 이미지용 파이프라인
+augmented_pipeline3 = [
+    dict(type='LoadAugmentedImage',
+         aug_dir='data/CUB_200_2011/augmented_images_3'),
+    dict(type='Normalize', **img_norm_cfg),
+    dict(type='ImageToTensor', keys=['img']),
+    dict(type='ToTensor', keys=['gt_label']),
+    dict(type='Collect', keys=['img', 'gt_label'], meta_keys=meta_keys)
+]
+# 증강 이미지용 파이프라인
+augmented_pipeline4 = [
+    dict(type='LoadAugmentedImage',
+         aug_dir='data/CUB_200_2011/augmented_images_4'),
+    dict(type='Normalize', **img_norm_cfg),
+    dict(type='ImageToTensor', keys=['img']),
+    dict(type='ToTensor', keys=['gt_label']),
+    dict(type='Collect', keys=['img', 'gt_label'], meta_keys=meta_keys)
+]
 # 회전된 이미지용 파이프라인 (별도 폴더)
 rotated_pipeline = [
     dict(type='LoadRotatedImage', rot_dir='data/CUB_200_2011/rotated_images'),
@@ -132,10 +158,10 @@ data = dict(
 # optimizer
 optimizer = dict(
     type='SGD',
-    lr=0.2,
+    lr=2.0,
     momentum=0.9,
     weight_decay=0.0005,
-    paramwise_cfg=dict(custom_keys={'backbone': dict(lr_mult=0.1)}))
+    paramwise_cfg=dict(custom_keys={'backbone': dict(lr_mult=0.05)}))
 
 optimizer_config = dict(grad_clip=None)
 lr_config = dict(
