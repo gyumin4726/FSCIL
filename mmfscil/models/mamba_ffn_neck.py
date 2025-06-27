@@ -179,15 +179,13 @@ class MambaNeck(BaseModule):
                  use_multi_scale_skip=False,
                  multi_scale_channels=[128, 256, 512],
                  # VMamba specific parameters
-                 vmamba_model='vmamba_base_s1l20',
-                 vmamba_checkpoint=None):
+                 vmamba_model='vmamba_base_s1l20'):
         super(MambaNeck, self).__init__(init_cfg=None)
         self.version = version
         assert self.version in ['ssm', 'ss2d', 'vmamba'], f'Invalid branch version: {self.version}. Must be one of: ssm, ss2d, vmamba'
         
         # VMamba specific parameters
         self.vmamba_model = vmamba_model
-        self.vmamba_checkpoint = vmamba_checkpoint
         self.avg = nn.AdaptiveAvgPool2d((1, 1))
         self.use_residual_proj = use_residual_proj
         self.mid_channels = in_channels * 2 if mid_channels is None else mid_channels
@@ -253,25 +251,22 @@ class MambaNeck(BaseModule):
             self.block = VSSBlock(
                 hidden_dim=out_channels,
                 drop_path=0.1,
-                channel_first=False,
+                channel_first=True,
                 ssm_d_state=d_state,
                 ssm_ratio=ssm_expand_ratio,
                 ssm_dt_rank="auto",
                 ssm_act_layer=nn.SiLU,
                 ssm_conv=3,
-                ssm_conv_bias=False,
+                ssm_conv_bias=True,
                 ssm_drop_rate=0.0,
                 ssm_init="v0",
-                forward_type="v05_noz",
+                forward_type="v2",
                 mlp_ratio=4.0,
                 mlp_act_layer=nn.GELU,
                 mlp_drop_rate=0.0,
                 use_checkpoint=False,
                 post_norm=False
             )
-            # Load pretrained weights if checkpoint provided
-            if self.vmamba_checkpoint is not None:
-                self._load_vmamba_checkpoint()
         else:
             self.block = SS2D(out_channels,
                               ssm_ratio=ssm_expand_ratio,
@@ -348,16 +343,16 @@ class MambaNeck(BaseModule):
                 self.block_new = VSSBlock(
                     hidden_dim=out_channels,
                     drop_path=0.1,
-                    channel_first=False,
+                    channel_first=True,
                     ssm_d_state=d_state,
                     ssm_ratio=ssm_expand_ratio,
                     ssm_dt_rank="auto",
                     ssm_act_layer=nn.SiLU,
                     ssm_conv=3,
-                    ssm_conv_bias=False,
+                    ssm_conv_bias=True,
                     ssm_drop_rate=0.0,
                     ssm_init="v0",
-                    forward_type="v05_noz",
+                    forward_type="v2",
                     mlp_ratio=4.0,
                     mlp_act_layer=nn.GELU,
                     mlp_drop_rate=0.0,
@@ -380,32 +375,6 @@ class MambaNeck(BaseModule):
                 ]))
 
         self.init_weights()
-
-    def _load_vmamba_checkpoint(self):
-        """Load VMamba pretrained checkpoint."""
-        try:
-            checkpoint = torch.load(self.vmamba_checkpoint, map_location='cpu')
-            if 'model' in checkpoint:
-                checkpoint = checkpoint['model']
-            
-            # Filter checkpoint keys for VSSBlock components
-            filtered_checkpoint = {}
-            for key, value in checkpoint.items():
-                # Extract relevant parameters for VSSBlock
-                if any(component in key for component in ['norm', 'op', 'mlp', 'drop_path']):
-                    new_key = key.replace('layers.', '').replace('blocks.', '')
-                    filtered_checkpoint[new_key] = value
-            
-            # Load compatible parameters
-            missing_keys, unexpected_keys = self.block.load_state_dict(filtered_checkpoint, strict=False)
-            self.logger.info(f"Loaded VMamba checkpoint: {len(filtered_checkpoint)} parameters")
-            if missing_keys:
-                self.logger.info(f"Missing keys: {len(missing_keys)}")
-            if unexpected_keys:
-                self.logger.info(f"Unexpected keys: {len(unexpected_keys)}")
-                
-        except Exception as e:
-            self.logger.warning(f"Failed to load VMamba checkpoint: {e}")
 
     def build_mlp(self, in_channels, out_channels, mid_channels, num_layers):
         """Builds the MLP projection part of the neck.
@@ -615,7 +584,7 @@ class MambaNeck(BaseModule):
                         'Cs_new': Cs_new
                     })
                 x_new = self.avg(x_new.permute(0, 3, 1, 2)).view(B, -1)
-        """Enhanced skip connection combination."""
+
         # Collect skip connections
         skip_features = [identity_proj]
         
@@ -635,6 +604,9 @@ class MambaNeck(BaseModule):
 
         # Add new branch features to skip connections
         if self.use_new_branch and 'x_new' in locals():
+            # 직접 x에 x_new를 더해줌
+            x = x + x_new
+            # skip connection에도 추가
             skip_features.append(x_new)
 
         # Cross-attention based skip connection fusion (MASC-M)
