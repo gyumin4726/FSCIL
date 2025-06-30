@@ -636,7 +636,7 @@ class MambaNeck(BaseModule):
             
             # Sum all weighted features
             weighted_skip = sum(weighted_skip_features)
-            final_output = x + weighted_skip
+            final_output = x + 0.1 * weighted_skip
             
             # 디버깅: cross-attention weights 출력
             if hasattr(self, 'logger') and torch.rand(1).item() < 0.01:  # 1% 확률로 로그
