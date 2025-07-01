@@ -646,14 +646,7 @@ class MambaNeck(BaseModule):
                     feature_names.append('new_branch')
                 weight_info = ', '.join([f"{name}: {val:.3f}" for name, val in zip(feature_names, weight_values)])
                 self.logger.info(f"Cross-attention weights: {weight_info}")
-        else:
-            # 단일 feature인 경우 - 간단한 attention
-            query = self.query_proj(x).unsqueeze(1)
-            key_value = self.key_proj(skip_features[0]).unsqueeze(1)
-            attended, _ = self.cross_attention(query, key_value, key_value)
-            weight = self.attention_output(attended.squeeze(1))[:, 0:1]
-            weighted_skip = weight * skip_features[0]
-            final_output = x + weighted_skip
+
 
         # Store outputs
         if not self.use_new_branch:
