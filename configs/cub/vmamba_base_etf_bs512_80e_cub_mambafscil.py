@@ -20,7 +20,7 @@ model = dict(backbone=dict(_delete_=True,
                        in_channels=768,  # VMamba base stage4 output channels
                        out_channels=768,
                        feat_size=7,  # 224 / (4*8) = 7 (patch_size=4, 4 downsample stages with 2x each)
-                       num_layers=2,
+                       num_layers=3,
                        use_residual_proj=True,
                        # Enhanced skip connection settings (MASC-M) for VMamba features
                        use_multi_scale_skip=True,

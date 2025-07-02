@@ -21,7 +21,7 @@ model = dict(backbone=dict(_delete_=True,
                        in_channels=768,  # VMamba base stage4 channels
                        out_channels=768,
                        feat_size=7,
-                       num_layers=2,
+                       num_layers=3,
                        use_residual_proj=True,
                        use_new_branch=True,
                        detach_residual=False,

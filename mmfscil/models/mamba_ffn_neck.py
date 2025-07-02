@@ -40,6 +40,8 @@ class MultiScaleSSMAdapter(BaseModule):
         d_state (int): Dimension of the hidden state in SS2D.
         dt_rank (int): Dimension rank in SS2D.
         ssm_expand_ratio (float): Expansion ratio for SS2D block.
+        num_layers (int): Number of layers in the MLP projections.
+        mid_channels (int, optional): Number of intermediate channels in MLP projections.
     """
     
     def __init__(self,
@@ -48,20 +50,22 @@ class MultiScaleSSMAdapter(BaseModule):
                  feat_size=7,
                  d_state=256,
                  dt_rank=256,
-                 ssm_expand_ratio=1.0):
+                 ssm_expand_ratio=1.0,
+                 num_layers=2,
+                 mid_channels=None):
         super(MultiScaleSSMAdapter, self).__init__(init_cfg=None)
         
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.feat_size = feat_size
+        self.num_layers = num_layers
+        self.mid_channels = in_channels * 2 if mid_channels is None else mid_channels
         
         # 1. Spatial size unification
         self.spatial_adapter = nn.AdaptiveAvgPool2d((feat_size, feat_size))
         
-        # 2. Pre-projection to target channels
-        self.pre_proj = nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=False)
-        self.pre_norm = nn.BatchNorm2d(out_channels)
-        self.pre_act = nn.ReLU(inplace=True)
+        # 2. Enhanced MLP projection (same as MambaNeck)
+        self.mlp_proj = MambaNeck.build_mlp(in_channels, out_channels, self.mid_channels, num_layers, feat_size)
         
         # 3. SS2D block for sequence modeling
         directions = ('h', 'h_flip', 'v', 'v_flip')
@@ -98,10 +102,8 @@ class MultiScaleSSMAdapter(BaseModule):
         # Step 1: Spatial size unification
         x = self.spatial_adapter(x)  # (B, C, feat_size, feat_size)
         
-        # Step 2: Channel projection to target dimensions
-        x = self.pre_proj(x)         # (B, out_channels, feat_size, feat_size)
-        x = self.pre_norm(x)
-        x = self.pre_act(x)
+        # Step 2: Enhanced MLP projection (same as MambaNeck)
+        x = self.mlp_proj(x)         # (B, out_channels, feat_size, feat_size)
         
         # Step 3: Prepare for SS2D processing
         x = x.permute(0, 2, 3, 1)    # (B, feat_size, feat_size, out_channels)
@@ -231,12 +233,14 @@ class MambaNeck(BaseModule):
             self.mlp_proj = self.build_mlp(in_channels,
                                            out_channels,
                                            self.mid_channels,
-                                           num_layers=3)
+                                           num_layers=3,
+                                           feat_size=self.feat_size)
         elif self.num_layers == 2:
             self.mlp_proj = self.build_mlp(in_channels,
                                            out_channels,
                                            self.mid_channels,
-                                           num_layers=2)
+                                           num_layers=2,
+                                           feat_size=self.feat_size)
 
         if self.version == 'ssm':
             self.block = Mamba(out_channels,
@@ -280,14 +284,16 @@ class MambaNeck(BaseModule):
         if self.use_multi_scale_skip:
             self.multi_scale_adapters = nn.ModuleList()
             for ch in self.multi_scale_channels:
-                # SS2D 기반 Multi-Scale Adapter
+                # SS2D 기반 Multi-Scale Adapter (same preprocessing as MambaNeck)
                 adapter = MultiScaleSSMAdapter(
                     in_channels=ch,
                     out_channels=out_channels,
                     feat_size=self.feat_size,
                     d_state=d_state,
                     dt_rank=self.d_rank,
-                    ssm_expand_ratio=ssm_expand_ratio
+                    ssm_expand_ratio=ssm_expand_ratio,
+                    num_layers=self.num_layers,  # Use same num_layers as main MambaNeck
+                    mid_channels=ch * 2  # Adaptive mid_channels based on input channels
                 )
                 self.multi_scale_adapters.append(adapter)
         
@@ -324,12 +330,14 @@ class MambaNeck(BaseModule):
                 self.mlp_proj_new = self.build_mlp(in_channels,
                                                    out_channels,
                                                    self.mid_channels,
-                                                   num_layers=3)
+                                                   num_layers=3,
+                                                   feat_size=self.feat_size)
             elif self.num_layers_new == 2:
                 self.mlp_proj_new = self.build_mlp(in_channels,
                                                    out_channels,
                                                    self.mid_channels,
-                                                   num_layers=2)
+                                                   num_layers=2,
+                                                   feat_size=self.feat_size)
 
             if self.version == 'ssm':
                 self.block_new = Mamba(out_channels,
@@ -376,7 +384,8 @@ class MambaNeck(BaseModule):
 
         self.init_weights()
 
-    def build_mlp(self, in_channels, out_channels, mid_channels, num_layers):
+    @staticmethod
+    def build_mlp(in_channels, out_channels, mid_channels, num_layers, feat_size):
         """Builds the MLP projection part of the neck.
 
         Args:
@@ -384,6 +393,7 @@ class MambaNeck(BaseModule):
             out_channels (int): Number of output channels.
             mid_channels (int): Number of mid-level channels.
             num_layers (int): Number of linear layers in the MLP.
+            feat_size (int): Size of the input feature map.
 
         Returns:
             nn.Sequential: The MLP layers as a sequential module.
@@ -398,7 +408,7 @@ class MambaNeck(BaseModule):
         layers.append(
             build_norm_layer(
                 dict(type='LN'),
-                [mid_channels, self.feat_size, self.feat_size])[1])
+                [mid_channels, feat_size, feat_size])[1])
         layers.append(nn.LeakyReLU(0.1))
 
         if num_layers == 3:
@@ -408,7 +418,7 @@ class MambaNeck(BaseModule):
             layers.append(
                 build_norm_layer(
                     dict(type='LN'),
-                    [mid_channels, self.feat_size, self.feat_size])[1])
+                    [mid_channels, feat_size, feat_size])[1])
             layers.append(nn.LeakyReLU(0.1))
 
         layers.append(
@@ -430,9 +440,12 @@ class MambaNeck(BaseModule):
         # Initialize multi-scale SS2D adapters
         if self.use_multi_scale_skip:
             for i, adapter in enumerate(self.multi_scale_adapters):
-                # Initialize pre-projection layers
-                if hasattr(adapter, 'pre_proj'):
-                    nn.init.kaiming_normal_(adapter.pre_proj.weight, mode='fan_out', nonlinearity='relu')
+                # Initialize MLP projection layers (same as MambaNeck)
+                if hasattr(adapter, 'mlp_proj'):
+                    # Initialize first Conv2d layer in MLP
+                    first_layer = adapter.mlp_proj[0]  # First Conv2d layer
+                    if isinstance(first_layer, nn.Conv2d):
+                        nn.init.kaiming_normal_(first_layer.weight, mode='fan_out', nonlinearity='relu')
                 
                 # Initialize SS2D blocks with small weights for stability
                 if hasattr(adapter, 'ss2d_block'):
@@ -441,7 +454,7 @@ class MambaNeck(BaseModule):
                         if hasattr(adapter.ss2d_block, 'in_proj'):
                             adapter.ss2d_block.in_proj.weight.data *= 0.1
                 
-                self.logger.info(f'Initialized MultiScaleSSMAdapter {i} for channel {self.multi_scale_channels[i]}')
+                self.logger.info(f'Initialized MultiScaleSSMAdapter {i} for channel {self.multi_scale_channels[i]} with {adapter.num_layers}-layer MLP')
 
     def forward(self, x, multi_scale_features=None):
         """Enhanced forward pass with multi-scale skip connections (MASC-M).
