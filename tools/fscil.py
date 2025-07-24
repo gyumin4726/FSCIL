@@ -87,6 +87,7 @@ def parse_args():
 
 
 def main():
+    global model, model_finetune
     args = parse_args()
 
     cfg = Config.fromfile(args.config)
@@ -175,6 +176,7 @@ def main():
     meta['seed'] = seed
 
     model = build_classifier(cfg.model)
+    model_finetune = build_classifier(cfg.model) # Assuming model_finetune is also a classifier
 
     load_checkpoint(model,
                     cfg.load_from,
@@ -195,4 +197,30 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except RuntimeError as e:
+        print(f"[DDP RuntimeError] {e}")
+        # 파라미터 인덱스와 이름 출력
+        import torch
+        from mmcv.runner import load_checkpoint
+        from mmcls.models import build_classifier
+        import sys
+        import traceback
+        
+        # 모델 객체가 model, model_finetune 등으로 되어 있을 수 있으니, globals()에서 찾아봄
+        model_obj = None
+        for name in ['model', 'model_finetune']:
+            if name in globals():
+                model_obj = globals()[name]
+                break
+        if model_obj is not None:
+            print("==== Model Parameter Index & Name ====")
+            for idx, (n, p) in enumerate(model_obj.named_parameters()):
+                print(f"{idx}: {n}, shape={tuple(p.shape)}")
+            print("==== End of Parameter List ====")
+        else:
+            print("[WARNING] 모델 객체를 찾을 수 없습니다. model/model_finetune 이름을 확인하세요.")
+        # 전체 traceback도 출력
+        traceback.print_exc()
+        sys.exit(1)
