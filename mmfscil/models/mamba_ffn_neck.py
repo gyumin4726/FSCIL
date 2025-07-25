@@ -477,6 +477,10 @@ class MambaNeck(BaseModule):
                 multi_scale_features = x[:-1]  # [layer1, layer2, layer3]
             x = x[-1]  # layer4 as main input
         
+        # multi_scale_features가 없으면 오류 발생
+        if self.use_multi_scale_skip and (multi_scale_features is None or len(multi_scale_features) == 0):
+            raise ValueError('use_multi_scale_skip=True 인데 multi_scale_features가 없습니다. backbone에서 여러 레이어 출력을 반환하도록 설정하세요.')
+
         B, C, H, W = x.shape
         identity = x
         outputs = {}
