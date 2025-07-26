@@ -1,12 +1,8 @@
 from collections import OrderedDict
-import sys
-import os
-import warnings
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from einops import rearrange
 from mmcv.cnn import build_norm_layer
 from mmcv.runner import BaseModule
 from rope import *
@@ -15,19 +11,10 @@ from timm.models.layers import trunc_normal_
 from mmcls.models.builder import NECKS
 from mmcls.utils import get_root_logger
 
-from .mamba_ssm.modules.mamba_simple import Mamba
 from .ss2d import SS2D
 
-# Import VMamba modules
-sys.path.append(os.path.join(os.path.dirname(__file__), '../../VMamba'))
-try:
-    from VMamba.vmamba import VSSBlock
-except ImportError:
-    warnings.warn("VMamba not found. VMamba version will not be available.")
-    VSSBlock = None
 
-
-class MultiScaleSSMAdapter(BaseModule):
+class MultiScaleSS2DAdapter(BaseModule):
     """SS2D-based Multi-Scale Feature Adapter.
     
     This adapter processes multi-scale features from different backbone layers
@@ -53,7 +40,7 @@ class MultiScaleSSMAdapter(BaseModule):
                  ssm_expand_ratio=1.0,
                  num_layers=2,
                  mid_channels=None):
-        super(MultiScaleSSMAdapter, self).__init__(init_cfg=None)
+        super(MultiScaleSS2DAdapter, self).__init__(init_cfg=None)
         
         self.in_channels = in_channels
         self.out_channels = out_channels
@@ -162,7 +149,6 @@ class MambaNeck(BaseModule):
                  in_channels=512,
                  out_channels=512,
                  mid_channels=None,
-                 version='ssm',
                  use_residual_proj=False,
                  d_state=256,
                  d_rank=None,
@@ -179,15 +165,10 @@ class MambaNeck(BaseModule):
                  detach_residual=False,
                  # Enhanced skip connection parameters
                  use_multi_scale_skip=False,
-                 multi_scale_channels=[128, 256, 512],
-                 # VMamba specific parameters
-                 vmamba_model='vmamba_base_s1l20'):
+                 multi_scale_channels=[128, 256, 512]):
         super(MambaNeck, self).__init__(init_cfg=None)
-        self.version = version
-        assert self.version in ['ssm', 'ss2d', 'vmamba'], f'Invalid branch version: {self.version}. Must be one of: ssm, ss2d, vmamba'
         
-        # VMamba specific parameters
-        self.vmamba_model = vmamba_model
+        # SS2D Neck parameters
         self.avg = nn.AdaptiveAvgPool2d((1, 1))
         self.use_residual_proj = use_residual_proj
         self.mid_channels = in_channels * 2 if mid_channels is None else mid_channels
@@ -242,50 +223,21 @@ class MambaNeck(BaseModule):
                                            num_layers=2,
                                            feat_size=self.feat_size)
 
-        if self.version == 'ssm':
-            self.block = Mamba(out_channels,
-                               expand=ssm_expand_ratio,
-                               use_out_proj=False,
-                               d_state=d_state,
-                               dt_rank=self.d_rank)
-        elif self.version == 'vmamba':
-            if VSSBlock is None:
-                raise ImportError("VMamba is not available. Please install VMamba to use 'vmamba' version.")
-            # Initialize VMamba VSSBlock
-            self.block = VSSBlock(
-                hidden_dim=out_channels,
-                drop_path=0.1,
-                channel_first=True,
-                ssm_d_state=d_state,
-                ssm_ratio=ssm_expand_ratio,
-                ssm_dt_rank="auto",
-                ssm_act_layer=nn.SiLU,
-                ssm_conv=3,
-                ssm_conv_bias=True,
-                ssm_drop_rate=0.0,
-                ssm_init="v0",
-                forward_type="v2",
-                mlp_ratio=4.0,
-                mlp_act_layer=nn.GELU,
-                mlp_drop_rate=0.0,
-                use_checkpoint=False,
-                post_norm=False
-            )
-        else:
-            self.block = SS2D(out_channels,
-                              ssm_ratio=ssm_expand_ratio,
-                              d_state=d_state,
-                              dt_rank=self.d_rank,
-                              directions=directions,
-                              use_out_proj=False,
-                              use_out_norm=True)
+        # SS2D block 초기화
+        self.block = SS2D(out_channels,
+                          ssm_ratio=ssm_expand_ratio,
+                          d_state=d_state,
+                          dt_rank=self.d_rank,
+                          directions=directions,
+                          use_out_proj=False,
+                          use_out_norm=True)
 
         # Multi-scale skip connection adapters
         if self.use_multi_scale_skip:
             self.multi_scale_adapters = nn.ModuleList()
             for ch in self.multi_scale_channels:
                 # SS2D 기반 Multi-Scale Adapter (same preprocessing as MambaNeck)
-                adapter = MultiScaleSSMAdapter(
+                adapter = MultiScaleSS2DAdapter(
                     in_channels=ch,
                     out_channels=out_channels,
                     feat_size=self.feat_size,
@@ -339,42 +291,14 @@ class MambaNeck(BaseModule):
                                                    num_layers=2,
                                                    feat_size=self.feat_size)
 
-            if self.version == 'ssm':
-                self.block_new = Mamba(out_channels,
-                                       expand=ssm_expand_ratio,
-                                       use_out_proj=False,
-                                       d_state=d_state,
-                                       dt_rank=self.d_rank)
-            elif self.version == 'vmamba':
-                if VSSBlock is None:
-                    raise ImportError("VMamba is not available. Please install VMamba to use 'vmamba' version.")
-                self.block_new = VSSBlock(
-                    hidden_dim=out_channels,
-                    drop_path=0.1,
-                    channel_first=True,
-                    ssm_d_state=d_state,
-                    ssm_ratio=ssm_expand_ratio,
-                    ssm_dt_rank="auto",
-                    ssm_act_layer=nn.SiLU,
-                    ssm_conv=3,
-                    ssm_conv_bias=True,
-                    ssm_drop_rate=0.0,
-                    ssm_init="v0",
-                    forward_type="v2",
-                    mlp_ratio=4.0,
-                    mlp_act_layer=nn.GELU,
-                    mlp_drop_rate=0.0,
-                    use_checkpoint=False,
-                    post_norm=False
-                )
-            else:
-                self.block_new = SS2D(out_channels,
-                                      ssm_ratio=ssm_expand_ratio,
-                                      d_state=d_state,
-                                      dt_rank=self.d_rank,
-                                      directions=directions,
-                                      use_out_proj=False,
-                                      use_out_norm=True)
+            # SS2D new branch 블록 초기화
+            self.block_new = SS2D(out_channels,
+                                  ssm_ratio=ssm_expand_ratio,
+                                  d_state=d_state,
+                                  dt_rank=self.d_rank,
+                                  directions=directions,
+                                  use_out_proj=False,
+                                  use_out_norm=True)
 
         if self.use_residual_proj:
             self.residual_proj = nn.Sequential(
@@ -454,7 +378,7 @@ class MambaNeck(BaseModule):
                         if hasattr(adapter.ss2d_block, 'in_proj'):
                             adapter.ss2d_block.in_proj.weight.data *= 0.1
                 
-                self.logger.info(f'Initialized MultiScaleSSMAdapter {i} for channel {self.multi_scale_channels[i]} with {adapter.num_layers}-layer MLP')
+                self.logger.info(f'Initialized MultiScaleSS2DAdapter {i} for channel {self.multi_scale_channels[i]} with {adapter.num_layers}-layer MLP')
 
     def forward(self, x, multi_scale_features=None):
         """Enhanced forward pass with multi-scale skip connections (MASC-M).
@@ -501,107 +425,35 @@ class MambaNeck(BaseModule):
         # Process the input tensor through MLP projection and add positional embeddings
         x = x.view(B, H * W, -1) + self.pos_embed
 
-        # First selective SSM branch processing
-        if self.version == 'ssm':
-            # SSM block processing
-            x_h, C_h = self.block(x, return_param=True)
-            if isinstance(C_h, list):
-                C_h, dts, Bs, Cs = C_h
-                outputs.update({
-                    'dts':
-                    dts.view(dts.shape[0], 1, dts.shape[1], dts.shape[2]),
-                    'Bs':
-                    Bs.view(Bs.shape[0], 1, Bs.shape[1], Bs.shape[2]),
-                    'Cs':
-                    Cs.view(Cs.shape[0], 1, Cs.shape[1], Cs.shape[2])
-                })
-            # Handle horizontal and vertical symmetry by processing flipped versions.
-            x_hf, C_hf = self.block(x.flip([1]), return_param=False)
-            xs_v = rearrange(x, 'b (h w) d -> b (w h) d', h=H,
-                             w=W).view(B, H * W, -1)
-            x_v, C_v = self.block(xs_v, return_param=False)
-            x_vf, C_vf = self.block(xs_v.flip([1]), return_param=False)
+        # SS2D processing
+        x = x.view(B, H, W, -1)
+        x, C = self.block(x, return_param=True)
 
-            x = x_h + x_hf.flip([1]) + rearrange(
-                x_v, 'b (h w) d -> b (w h) d', h=H, w=W) + rearrange(
-                    x_vf.flip([1]), 'b (h w) d -> b (w h) d', h=H, w=W)
-            C = C_h + C_hf.flip([1]) + rearrange(
-                C_v, 'b d (h w) -> b d (w h)', h=H, w=W) + rearrange(
-                    C_vf.flip([1]), 'b d (h w) -> b d (w h)', h=H, w=W)
-            x = self.avg(x.permute(0, 2, 1).reshape(B, -1, H, W)).view(B, -1)
-        elif self.version == 'vmamba':
-            # VMamba VSSBlock processing
-            x = x.view(B, H, W, -1)
-            x = self.block(x)  # VSSBlock forward
-            C = None  # VSSBlock doesn't return parameters like SS2D
-            x = self.avg(x.permute(0, 3, 1, 2)).view(B, -1)
-        else:
-            # SS2D processing
-            x = x.view(B, H, W, -1)
-            x, C = self.block(x, return_param=True)
-
-            if isinstance(C, list):
-                C, dts, Bs, Cs = C
-                outputs.update({'dts': dts, 'Bs': Bs, 'Cs': Cs})
-            x = self.avg(x.permute(0, 3, 1, 2)).view(B, -1)
+        if isinstance(C, list):
+            C, dts, Bs, Cs = C
+            outputs.update({'dts': dts, 'Bs': Bs, 'Cs': Cs})
+        x = self.avg(x.permute(0, 3, 1, 2)).view(B, -1)
 
         # New branch processing for incremental learning sessions, if enabled.
         if self.use_new_branch:
             x_new = self.mlp_proj_new(identity.detach()).permute(
                 0, 2, 3, 1).view(B, H * W, -1)
             x_new += self.pos_embed_new
-            if self.version == 'ssm':
-                x_h_new, C_h_new = self.block_new(x_new, return_param=True)
-                if isinstance(C_h_new, list):
-                    C_h_new, dts_new, Bs_new, Cs_new = C_h_new
-                    outputs.update({
-                        'dts_new':
-                        dts_new.view(dts_new.shape[0], 1, dts_new.shape[1],
-                                     dts_new.shape[2]),
-                        'Bs_new':
-                        Bs_new.view(Bs_new.shape[0], 1, Bs_new.shape[1],
-                                    Bs_new.shape[2]),
-                        'Cs_new':
-                        Cs_new.view(Cs_new.shape[0], 1, Cs_new.shape[1],
-                                    Cs_new.shape[2])
-                    })
+            # SS2D processing for new branch
+            x_new = x_new.view(B, H, W, -1)
+            x_new, C_new = self.block_new(x_new, return_param=True)
+            if isinstance(C_new, list):
+                C_new, dts_new, Bs_new, Cs_new = C_new
+                outputs.update({
+                    'dts_new': dts_new,
+                    'Bs_new': Bs_new,
+                    'Cs_new': Cs_new
+                })
+            x_new = self.avg(x_new.permute(0, 3, 1, 2)).view(B, -1)
 
-                x_hf_new, C_hf_new = self.block_new(x_new.flip([1]),
-                                                    return_param=False)
-                xs_v_new = rearrange(x_new, 'b (h w) d -> b (w h) d', h=H,
-                                     w=W).view(B, H * W, -1)
-                x_v_new, C_v_new = self.block_new(xs_v_new, return_param=False)
-                x_vf_new, C_vf_new = self.block_new(xs_v_new.flip([1]),
-                                                    return_param=False)
-
-                # Combine outputs from new branch.
-                x_new = x_h_new + x_hf_new.flip([1]) + rearrange(
-                    x_v_new, 'b (h w) d -> b (w h) d', h=H, w=W) + rearrange(
-                        x_vf_new.flip([1]), 'b (h w) d -> b (w h) d', h=H, w=W)
-                C_new = C_h_new + C_hf_new.flip([1]) + rearrange(
-                    C_v_new, 'b d (h w) -> b d (w h)', h=H, w=W) + rearrange(
-                        C_vf_new.flip([1]), 'b d (h w) -> b d (w h)', h=H, w=W)
-                x_new = self.avg(x_new.permute(0, 2,
-                                               1).reshape(B, -1, H,
-                                                          W)).view(B, -1)
-            elif self.version == 'vmamba':
-                # VMamba VSSBlock processing for new branch
-                x_new = x_new.view(B, H, W, -1)
-                x_new = self.block_new(x_new)  # VSSBlock forward
-                C_new = None  # VSSBlock doesn't return parameters
-                x_new = self.avg(x_new.permute(0, 3, 1, 2)).view(B, -1)
-            else:
-                x_new = x_new.view(B, H, W, -1)
-                x_new, C_new = self.block_new(x_new, return_param=True)
-                if isinstance(C_new, list):
-                    C_new, dts_new, Bs_new, Cs_new = C_new
-                    outputs.update({
-                        'dts_new': dts_new,
-                        'Bs_new': Bs_new,
-                        'Cs_new': Cs_new
-                    })
-                x_new = self.avg(x_new.permute(0, 3, 1, 2)).view(B, -1)
-
+        # Initialize final output with main feature
+        final_output = x
+        
         # Collect skip connections
         skip_features = [identity_proj]
         
@@ -658,9 +510,13 @@ class MambaNeck(BaseModule):
             # 디버깅: cross-attention weights 출력
             if hasattr(self, 'logger') and torch.rand(1).item() < 0.01:  # 1% 확률로 로그
                 weight_values = final_attention_weights[0].detach().cpu().numpy()
-                feature_names = ['layer4(identity)', 'layer1', 'layer2', 'layer3'][:len(skip_features)]
-                if self.use_new_branch and len(skip_features) > len(feature_names):
+                # Generate dynamic feature names based on actual skip features
+                feature_names = ['layer4(identity)']
+                if self.use_multi_scale_skip:
+                    feature_names.extend([f'layer{i+1}' for i in range(len(self.multi_scale_channels))])
+                if self.use_new_branch:
                     feature_names.append('new_branch')
+                feature_names = feature_names[:len(skip_features)]
                 weight_info = ', '.join([f"{name}: {val:.3f}" for name, val in zip(feature_names, weight_values)])
                 self.logger.info(f"Cross-attention weights: {weight_info}")
 

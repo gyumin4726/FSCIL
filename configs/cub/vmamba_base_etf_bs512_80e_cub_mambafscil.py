@@ -16,7 +16,6 @@ model = dict(backbone=dict(_delete_=True,
                            frozen_stages=0,  # Freeze patch embedding and first stage
                            channel_first=True),
              neck=dict(type='MambaNeck',
-                       version='ss2d',
                        in_channels=768,  # VMamba base stage4 output channels
                        out_channels=768,
                        feat_size=7,  # 224 / (4*8) = 7 (patch_size=4, 4 downsample stages with 2x each)

@@ -17,7 +17,6 @@ model = dict(backbone=dict(_delete_=True,
                            frozen_stages=0,  # Freeze patch embedding and first stage
                            channel_first=True),
              neck=dict(type='MambaNeck',
-                       version='ss2d',
                        in_channels=768,  # VMamba base stage4 channels
                        out_channels=768,
                        feat_size=7,
@@ -32,7 +31,7 @@ model = dict(backbone=dict(_delete_=True,
                        loss_weight_sep_new=0.001,
                        param_avg_dim='0-1-3',
                        # Enhanced skip connection settings (MASC-M)
-                       use_multi_scale_skip=True,
+                       use_multi_scale_skip=False,
                        multi_scale_channels=[96, 192, 384]), 
              head=dict(type='ETFHead',
                        in_channels=768,

@@ -11,7 +11,6 @@ model = dict(
     ),
     neck=dict(
         type='MambaNeck',
-        version='ss2d',
         in_channels=1024,  # VMamba base final layer channels
         out_channels=1024,
         feat_size=7,  # 224/32 = 7 (after 4 downsample stages)
