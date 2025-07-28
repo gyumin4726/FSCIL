@@ -32,7 +32,7 @@ model = dict(backbone=dict(_delete_=True,
                        param_avg_dim='0-1-3',
                        # Enhanced skip connection settings (MASC-M)
                        use_multi_scale_skip=False,
-                       multi_scale_channels=[96, 192, 384]), 
+                       multi_scale_channels=[128, 256, 512]),
              head=dict(type='ETFHead',
                        in_channels=1024,
                        num_classes=200,
