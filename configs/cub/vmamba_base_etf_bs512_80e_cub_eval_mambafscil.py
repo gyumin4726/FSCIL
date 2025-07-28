@@ -11,14 +11,14 @@ inc_step = 10
 # model settings
 model = dict(backbone=dict(_delete_=True,
                            type='VMambaBackbone',
-                           model_name='vmamba_tiny_s2l5',  # VMamba Tiny model name for MambaNeck
-                           pretrained_path='./vssm_tiny_0230_ckpt_epoch_262.pth',  # VMamba Tiny s2l5 pretrained weights
+                           model_name='vmamba_base_s2l15',  # 모델 변경
+                           pretrained_path='./vssm_base_0229_ckpt_epoch_237.pth',
                            out_indices=(0, 1, 2, 3),  # Multi-scale features from all stages
                            frozen_stages=0,  # Freeze patch embedding and first stage
                            channel_first=True),
              neck=dict(type='MambaNeck',
-                       in_channels=768,  # VMamba base stage4 channels
-                       out_channels=768,
+                       in_channels=1024,  # VMamba base stage4 channels
+                       out_channels=1024,
                        feat_size=7,
                        num_layers=3,
                        use_residual_proj=True,
@@ -34,7 +34,7 @@ model = dict(backbone=dict(_delete_=True,
                        use_multi_scale_skip=False,
                        multi_scale_channels=[96, 192, 384]), 
              head=dict(type='ETFHead',
-                       in_channels=768,
+                       in_channels=1024,
                        num_classes=200,
                        eval_classes=100,
                        loss=dict(type='CombinedLoss', dr_weight=0.0, ce_weight=1.0),

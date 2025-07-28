@@ -10,22 +10,22 @@ inc_step = 10
 
 model = dict(backbone=dict(_delete_=True,
                            type='VMambaBackbone',
-                           model_name='vmamba_tiny_s2l5',  # VMamba Tiny model name for MambaNeck
-                           pretrained_path='./vssm_tiny_0230_ckpt_epoch_262.pth',  # VMamba Tiny s2l5 pretrained weights
+                           model_name='vmamba_base_s2l15',  # 모델 변경
+                           pretrained_path='./vssm_base_0229_ckpt_epoch_237.pth',
                            out_indices=(0, 1, 2, 3),  # Extract features from all 4 stages
                            frozen_stages=0,  # Freeze patch embedding and first stage
                            channel_first=True),
              neck=dict(type='MambaNeck',
-                       in_channels=768,  # VMamba base stage4 output channels
-                       out_channels=768,
+                       in_channels=1024,  # VMamba base stage4 output channels
+                       out_channels=1024,
                        feat_size=7,  # 224 / (4*8) = 7 (patch_size=4, 4 downsample stages with 2x each)
                        num_layers=3,
                        use_residual_proj=True,
                        # Enhanced skip connection settings (MASC-M) for VMamba features
                        use_multi_scale_skip=True,
-                       multi_scale_channels=[96, 192, 384]),
+                       multi_scale_channels=[128, 256, 512]),
              head=dict(type='ETFHead',
-                       in_channels=768,
+                       in_channels=1024,
                        num_classes=200,
                        eval_classes=100,
                        with_len=False,
@@ -122,8 +122,8 @@ test_pipeline = [
 ]
 
 data = dict(
-    samples_per_gpu=64,
-    workers_per_gpu=4,
+    samples_per_gpu=32,
+    workers_per_gpu=1,
     train_dataloader=dict(persistent_workers=True),
     val_dataloader=dict(persistent_workers=True),
     test_dataloader=dict(persistent_workers=True),
