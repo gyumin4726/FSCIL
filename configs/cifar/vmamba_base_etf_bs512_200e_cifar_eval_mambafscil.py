@@ -13,13 +13,15 @@ model = dict(backbone=dict(_delete_=True,
                            type='VMambaBackbone',
                            model_name='vmamba_base_s2l15',  # 모델 변경
                            pretrained_path='./vssm_base_0229_ckpt_epoch_237.pth',
+                           patch_size=2,  # 패치 크기를 2로 변경
+                           imgsize=32,    # CIFAR 이미지 크기 설정
                            out_indices=(0, 1, 2, 3),  # Multi-scale features from all stages
                            frozen_stages=0,  # Freeze patch embedding and first stage
                            channel_first=True),
              neck=dict(type='MambaNeck',
                        in_channels=1024,  # VMamba base stage4 channels
                        out_channels=1024,
-                       feat_size=7,
+                       feat_size=5,  # 실제 출력 크기에 맞게 수정 (5×5)
                        num_layers=3,
                        use_residual_proj=True,
                        use_new_branch=True,
@@ -64,8 +66,6 @@ optimizer = dict(type='SGD',
                          'neck.skip_attention': dict(lr_mult=1.0),
                          'neck.skip_proj': dict(lr_mult=1.0),
                      }))
-
-optimizer_config = dict(grad_clip=None)
 
 lr_config = dict(
     policy='CosineAnnealingCooldown',

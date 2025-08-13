@@ -12,13 +12,15 @@ model = dict(backbone=dict(_delete_=True,
                            type='VMambaBackbone',
                            model_name='vmamba_base_s2l15',  # 모델 변경
                            pretrained_path='./vssm_base_0229_ckpt_epoch_237.pth',
+                           patch_size=2,  # 패치 크기를 2로 변경 (1에서 문제 발생)
+                           imgsize=32,    # CIFAR 이미지 크기 설정
                            out_indices=(0, 1, 2, 3),  # Extract features from all 4 stages
                            frozen_stages=0,  # Freeze patch embedding and first stage
                            channel_first=True),
              neck=dict(type='MambaNeck',
                        in_channels=1024,  # VMamba base stage4 output channels
                        out_channels=1024,
-                       feat_size=7,  # 224 / (4*8) = 7 (patch_size=4, 4 downsample stages with 2x each)
+                       feat_size=5,  # 실제 출력 크기에 맞게 수정 (5×5)
                        num_layers=3,
                        use_residual_proj=True,
                        # Enhanced skip connection settings (MASC-M) for VMamba features
@@ -47,8 +49,6 @@ train_pipeline = [
          size=img_size,
          scale=(0.6, 1.),
          interpolation='bicubic'),
-    dict(type='RandomFlip', flip_prob=0.5, direction='horizontal'),
-    dict(type='ColorJitter', brightness=0.4, contrast=0.4, saturation=0.4),
     dict(type='Normalize', **img_norm_cfg),
     dict(type='ImageToTensor', keys=['img']),
     dict(type='ToTensor', keys=['gt_label']),
