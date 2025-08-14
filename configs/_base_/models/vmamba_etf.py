@@ -25,8 +25,8 @@ model = dict(
     head=dict(
         type='ETFHead',
         in_channels=1024,
-        num_classes=200,
-        eval_classes=100,
+        num_classes=100,
+        eval_classes=60,
         with_len=False,
         cal_acc=True
     ),
