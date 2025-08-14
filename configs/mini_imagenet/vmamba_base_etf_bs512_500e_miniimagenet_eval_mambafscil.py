@@ -21,7 +21,7 @@ model = dict(backbone=dict(type='VMambaBackbone',
                        detach_residual=True,
                        num_layers_new=2,
                        loss_weight_supp=100,
-                       loss_weight_supp_new=0.5,
+                       loss_weight_sep_new=0.5,
                        param_avg_dim='0-1-3',
                        # Enhanced skip connection settings (MASC-M)
                        use_multi_scale_skip=False,
