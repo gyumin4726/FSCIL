@@ -3,6 +3,7 @@ from collections import OrderedDict
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from einops import rearrange
 from mmcv.cnn import build_norm_layer
 from mmcv.runner import BaseModule
 from rope import *
@@ -11,6 +12,7 @@ from timm.models.layers import trunc_normal_
 from mmcls.models.builder import NECKS
 from mmcls.utils import get_root_logger
 
+from .mamba_ssm.modules.mamba_simple import Mamba
 from .ss2d import SS2D
 
 
@@ -149,6 +151,7 @@ class MambaNeck(BaseModule):
                  in_channels=512,
                  out_channels=512,
                  mid_channels=None,
+                 version='ss2d',
                  use_residual_proj=False,
                  d_state=256,
                  d_rank=None,
@@ -167,6 +170,10 @@ class MambaNeck(BaseModule):
                  use_multi_scale_skip=False,
                  multi_scale_channels=[128, 256, 512]):
         super(MambaNeck, self).__init__(init_cfg=None)
+        
+        # Version selection
+        self.version = version
+        assert self.version in ['ssm', 'ss2d'], f'Invalid branch version: {self.version}. Must be "ssm" or "ss2d".'
         
         # SS2D Neck parameters
         self.avg = nn.AdaptiveAvgPool2d((1, 1))
@@ -196,6 +203,7 @@ class MambaNeck(BaseModule):
         # Log the effective configuration
         self.logger.info(f"MASC-M Enhanced Skip Connections: Using cross-attention fusion with {len(self.multi_scale_channels)} multi-scale layers")
         self.logger.info(f"Multi-Scale SS2D Adapters: {self.multi_scale_channels} → {out_channels} channels with SS2D processing")
+        self.logger.info(f"Using {self.version.upper()} version for state space modeling")
         
         directions = ('h', 'h_flip', 'v', 'v_flip')
 
@@ -223,14 +231,21 @@ class MambaNeck(BaseModule):
                                            num_layers=2,
                                            feat_size=self.feat_size)
 
-        # SS2D block 초기화
-        self.block = SS2D(out_channels,
-                          ssm_ratio=ssm_expand_ratio,
-                          d_state=d_state,
-                          dt_rank=self.d_rank,
-                          directions=directions,
-                          use_out_proj=False,
-                          use_out_norm=True)
+        # SSM/SS2D block initialization based on version
+        if self.version == 'ssm':
+            self.block = Mamba(out_channels,
+                               expand=ssm_expand_ratio,
+                               use_out_proj=False,
+                               d_state=d_state,
+                               dt_rank=self.d_rank)
+        else:  # ss2d
+            self.block = SS2D(out_channels,
+                              ssm_ratio=ssm_expand_ratio,
+                              d_state=d_state,
+                              dt_rank=self.d_rank,
+                              directions=directions,
+                              use_out_proj=False,
+                              use_out_norm=True)
 
         # Multi-scale skip connection adapters
         if self.use_multi_scale_skip:
@@ -291,14 +306,21 @@ class MambaNeck(BaseModule):
                                                    num_layers=2,
                                                    feat_size=self.feat_size)
 
-            # SS2D new branch 블록 초기화
-            self.block_new = SS2D(out_channels,
-                                  ssm_ratio=ssm_expand_ratio,
-                                  d_state=d_state,
-                                  dt_rank=self.d_rank,
-                                  directions=directions,
-                                  use_out_proj=False,
-                                  use_out_norm=True)
+            # SSM/SS2D new branch 블록 초기화 based on version
+            if self.version == 'ssm':
+                self.block_new = Mamba(out_channels,
+                                       expand=ssm_expand_ratio,
+                                       use_out_proj=False,
+                                       d_state=d_state,
+                                       dt_rank=self.d_rank)
+            else:  # ss2d
+                self.block_new = SS2D(out_channels,
+                                      ssm_ratio=ssm_expand_ratio,
+                                      d_state=d_state,
+                                      dt_rank=self.d_rank,
+                                      directions=directions,
+                                      use_out_proj=False,
+                                      use_out_norm=True)
 
         if self.use_residual_proj:
             self.residual_proj = nn.Sequential(
@@ -353,8 +375,12 @@ class MambaNeck(BaseModule):
         """Enhanced initialization for skip connections."""
         if self.use_new_branch:
             with torch.no_grad():
-                dim_proj = int(self.block_new.in_proj.weight.shape[0] / 2)
-                self.block_new.in_proj.weight.data[-dim_proj:, :].zero_()
+                if self.version == 'ssm':
+                    dim_proj = int(self.block_new.in_proj.weight.shape[0] / 2)
+                    self.block_new.in_proj.weight.data[-dim_proj:, :].zero_()
+                else:  # ss2d
+                    dim_proj = int(self.block_new.in_proj.weight.shape[0] / 2)
+                    self.block_new.in_proj.weight.data[-dim_proj:, :].zero_()
             self.logger.info(
                 f'--MambaNeck zero_init_residual z: '
                 f'(self.block_new.in_proj.weight{self.block_new.in_proj.weight.shape}), '
@@ -425,31 +451,96 @@ class MambaNeck(BaseModule):
         # Process the input tensor through MLP projection and add positional embeddings
         x = x.view(B, H * W, -1) + self.pos_embed
 
-        # SS2D processing
-        x = x.view(B, H, W, -1)
-        x, C = self.block(x, return_param=True)
+        # SSM/SS2D processing based on version
+        if self.version == 'ssm':
+            # SSM block processing
+            x_h, C_h = self.block(x, return_param=True)
+            if isinstance(C_h, list):
+                C_h, dts, Bs, Cs = C_h
+                outputs.update({
+                    'dts':
+                    dts.view(dts.shape[0], 1, dts.shape[1], dts.shape[2]),
+                    'Bs':
+                    Bs.view(Bs.shape[0], 1, Bs.shape[1], Bs.shape[2]),
+                    'Cs':
+                    Cs.view(Cs.shape[0], 1, Cs.shape[1], Cs.shape[2])
+                })
+            # Handle horizontal and vertical symmetry by processing flipped versions.
+            x_hf, C_hf = self.block(x.flip([1]), return_param=False)
+            xs_v = rearrange(x, 'b (h w) d -> b (w h) d', h=H,
+                             w=W).view(B, H * W, -1)
+            x_v, C_v = self.block(xs_v, return_param=False)
+            x_vf, C_vf = self.block(xs_v.flip([1]), return_param=False)
 
-        if isinstance(C, list):
-            C, dts, Bs, Cs = C
-            outputs.update({'dts': dts, 'Bs': Bs, 'Cs': Cs})
-        x = self.avg(x.permute(0, 3, 1, 2)).view(B, -1)
+            x = x_h + x_hf.flip([1]) + rearrange(
+                x_v, 'b (h w) d -> b (w h) d', h=H, w=W) + rearrange(
+                    x_vf.flip([1]), 'b (h w) d -> b (w h) d', h=H, w=W)
+            C = C_h + C_hf.flip([1]) + rearrange(
+                C_v, 'b d (h w) -> b d (w h)', h=H, w=W) + rearrange(
+                    C_vf.flip([1]), 'b d (h w) -> b d (w h)', h=H, w=W)
+            x = self.avg(x.permute(0, 2, 1).reshape(B, -1, H, W)).view(B, -1)
+        else:
+            # SS2D processing
+            x = x.view(B, H, W, -1)
+            x, C = self.block(x, return_param=True)
+
+            if isinstance(C, list):
+                C, dts, Bs, Cs = C
+                outputs.update({'dts': dts, 'Bs': Bs, 'Cs': Cs})
+            x = self.avg(x.permute(0, 3, 1, 2)).view(B, -1)
 
         # New branch processing for incremental learning sessions, if enabled.
         if self.use_new_branch:
             x_new = self.mlp_proj_new(identity.detach()).permute(
                 0, 2, 3, 1).view(B, H * W, -1)
             x_new += self.pos_embed_new
-            # SS2D processing for new branch
-            x_new = x_new.view(B, H, W, -1)
-            x_new, C_new = self.block_new(x_new, return_param=True)
-            if isinstance(C_new, list):
-                C_new, dts_new, Bs_new, Cs_new = C_new
-                outputs.update({
-                    'dts_new': dts_new,
-                    'Bs_new': Bs_new,
-                    'Cs_new': Cs_new
-                })
-            x_new = self.avg(x_new.permute(0, 3, 1, 2)).view(B, -1)
+            
+            if self.version == 'ssm':
+                x_h_new, C_h_new = self.block_new(x_new, return_param=True)
+                if isinstance(C_h_new, list):
+                    C_h_new, dts_new, Bs_new, Cs_new = C_h_new
+                    outputs.update({
+                        'dts_new':
+                        dts_new.view(dts_new.shape[0], 1, dts_new.shape[1],
+                                     dts_new.shape[2]),
+                        'Bs_new':
+                        Bs_new.view(Bs_new.shape[0], 1, Bs_new.shape[1],
+                                    Bs_new.shape[2]),
+                        'Cs_new':
+                        Cs_new.view(Cs_new.shape[0], 1, Cs_new.shape[1],
+                                    Cs_new.shape[2])
+                    })
+
+                x_hf_new, C_hf_new = self.block_new(x_new.flip([1]),
+                                                    return_param=False)
+                xs_v_new = rearrange(x_new, 'b (h w) d -> b (w h) d', h=H,
+                                     w=W).view(B, H * W, -1)
+                x_v_new, C_v_new = self.block_new(xs_v_new, return_param=False)
+                x_vf_new, C_vf_new = self.block_new(xs_v_new.flip([1]),
+                                                    return_param=False)
+
+                # Combine outputs from new branch.
+                x_new = x_h_new + x_hf_new.flip([1]) + rearrange(
+                    x_v_new, 'b (h w) d -> b (w h) d', h=H, w=W) + rearrange(
+                        x_vf_new.flip([1]), 'b (h w) d -> b (w h) d', h=H, w=W)
+                C_new = C_h_new + C_hf_new.flip([1]) + rearrange(
+                    C_v_new, 'b d (h w) -> b d (w h)', h=H, w=W) + rearrange(
+                        C_vf_new.flip([1]), 'b d (h w) -> b d (w h)', h=H, w=W)
+                x_new = self.avg(x_new.permute(0, 2,
+                                               1).reshape(B, -1, H,
+                                                          W)).view(B, -1)
+            else:
+                # SS2D processing for new branch
+                x_new = x_new.view(B, H, W, -1)
+                x_new, C_new = self.block_new(x_new, return_param=True)
+                if isinstance(C_new, list):
+                    C_new, dts_new, Bs_new, Cs_new = C_new
+                    outputs.update({
+                        'dts_new': dts_new,
+                        'Bs_new': Bs_new,
+                        'Cs_new': Cs_new
+                    })
+                x_new = self.avg(x_new.permute(0, 3, 1, 2)).view(B, -1)
 
         # Initialize final output with main feature
         final_output = x

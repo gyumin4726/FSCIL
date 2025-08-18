@@ -8,14 +8,14 @@ inc_start = 100
 inc_end = 200
 inc_step = 10
 
-model = dict(backbone=dict(_delete_=True,
-                           type='VMambaBackbone',
+model = dict(backbone=dict(type='VMambaBackbone',
                            model_name='vmamba_base_s2l15',  # 모델 변경
                            pretrained_path='./vssm_base_0229_ckpt_epoch_237.pth',
                            out_indices=(0, 1, 2, 3),  # Extract features from all 4 stages
                            frozen_stages=0,  # Freeze patch embedding and first stage
                            channel_first=True),
              neck=dict(type='MambaNeck',
+                       version='ss2d',
                        in_channels=1024,  # VMamba base stage4 output channels
                        out_channels=1024,
                        feat_size=7,  # 224 / (4*8) = 7 (patch_size=4, 4 downsample stages with 2x each)
