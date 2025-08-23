@@ -8,8 +8,6 @@ meta_keys = ('filename', 'ori_filename', 'ori_shape', 'img_shape', 'flip',
 train_pipeline = [
     dict(type='LoadImageFromFile'),
     dict(type='RandomResizedCrop', size=img_size),
-    dict(type='RandomFlip', flip_prob=0.5, direction='horizontal'),
-    dict(type='ColorJitter', brightness=0.4, contrast=0.4, saturation=0.4),
     dict(type='Normalize', **img_norm_cfg),
     dict(type='ImageToTensor', keys=['img']),
     dict(type='ToTensor', keys=['gt_label']),
@@ -26,12 +24,12 @@ test_pipeline = [
 ]
 
 data = dict(samples_per_gpu=64,
-            workers_per_gpu=8,
+            workers_per_gpu=4,
             train_dataloader=dict(persistent_workers=True, ),
             val_dataloader=dict(persistent_workers=True, ),
             test_dataloader=dict(persistent_workers=True, ),
             train=dict(type='RepeatDataset',
-                       times=10,
+                       times=1,
                        dataset=dict(
                            type='MiniImageNetFSCILDataset',
                            data_prefix='./data/miniimagenet',
