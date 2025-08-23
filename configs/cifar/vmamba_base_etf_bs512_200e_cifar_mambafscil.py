@@ -8,19 +8,17 @@ inc_start = 60
 inc_end = 100
 inc_step = 5
 
-model = dict(backbone=dict(_delete_=True,
-                           type='VMambaBackbone',
+model = dict(backbone=dict(type='VMambaBackbone',
                            model_name='vmamba_base_s2l15',  # 모델 변경
                            pretrained_path='./vssm_base_0229_ckpt_epoch_237.pth',
-                           patch_size=2,  # 패치 크기를 2로 변경 (1에서 문제 발생)
-                           imgsize=32,    # CIFAR 이미지 크기 설정
                            out_indices=(0, 1, 2, 3),  # Extract features from all 4 stages
                            frozen_stages=0,  # Freeze patch embedding and first stage
                            channel_first=True),
              neck=dict(type='MambaNeck',
+                       version='ss2d',
                        in_channels=1024,  # VMamba base stage4 output channels
                        out_channels=1024,
-                       feat_size=5,  # 실제 출력 크기에 맞게 수정 (5×5)
+                       feat_size=1,  # 실제 출력 크기에 맞게 수정 (5×5)
                        num_layers=3,
                        use_residual_proj=True,
                        # Enhanced skip connection settings (MASC-M) for VMamba features
@@ -35,59 +33,3 @@ model = dict(backbone=dict(_delete_=True,
                        loss=dict(type='CombinedLoss', dr_weight=0.0, ce_weight=1.0)),
              mixup=0,
              mixup_prob=0)
-
-img_size = 32
-_img_resize_size = 36
-img_norm_cfg = dict(mean=[129.304, 124.070, 112.434],
-                    std=[68.170, 65.392, 70.418],
-                    to_rgb=False)
-meta_keys = ('filename', 'ori_filename', 'ori_shape', 'img_shape', 'flip',
-             'flip_direction', 'img_norm_cfg', 'cls_id', 'img_id')
-
-train_pipeline = [
-    dict(type='RandomResizedCrop',
-         size=img_size,
-         scale=(0.6, 1.),
-         interpolation='bicubic'),
-    dict(type='Normalize', **img_norm_cfg),
-    dict(type='ImageToTensor', keys=['img']),
-    dict(type='ToTensor', keys=['gt_label']),
-    dict(type='Collect', keys=['img', 'gt_label'], meta_keys=meta_keys)
-]
-
-test_pipeline = [
-    dict(type='Resize', size=(_img_resize_size, -1), interpolation='bicubic'),
-    dict(type='CenterCrop', crop_size=img_size),
-    dict(type='Normalize', **img_norm_cfg),
-    dict(type='ImageToTensor', keys=['img']),
-    dict(type='Collect', keys=['img', 'gt_label'], meta_keys=meta_keys)
-]
-
-data = dict(samples_per_gpu=64,
-            workers_per_gpu=8,
-            train_dataloader=dict(persistent_workers=True, ),
-            val_dataloader=dict(persistent_workers=True, ),
-            test_dataloader=dict(persistent_workers=True, ),
-            train=dict(type='RepeatDataset',
-                       times=1,
-                       dataset=dict(
-                           type='CIFAR100FSCILDataset',
-                           data_prefix='./data/cifar',
-                           pipeline=train_pipeline,
-                           num_cls=60,
-                           subset='train',
-                       )),
-            val=dict(
-                type='CIFAR100FSCILDataset',
-                data_prefix='./data/cifar',
-                pipeline=test_pipeline,
-                num_cls=60,
-                subset='test',
-            ),
-            test=dict(
-                type='CIFAR100FSCILDataset',
-                data_prefix='./data/cifar',
-                pipeline=test_pipeline,
-                num_cls=100,
-                subset='test',
-            ))

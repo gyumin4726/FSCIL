@@ -11,8 +11,6 @@ train_pipeline = [
          size=img_size,
          scale=(0.6, 1.),
          interpolation='bicubic'),
-    dict(type='RandomFlip', flip_prob=0.5, direction='horizontal'),
-    dict(type='ColorJitter', brightness=0.4, contrast=0.4, saturation=0.4),
     dict(type='Normalize', **img_norm_cfg),
     dict(type='ImageToTensor', keys=['img']),
     dict(type='ToTensor', keys=['gt_label']),
@@ -28,12 +26,12 @@ test_pipeline = [
 ]
 
 data = dict(samples_per_gpu=64,
-            workers_per_gpu=8,
+            workers_per_gpu=4,
             train_dataloader=dict(persistent_workers=True, ),
             val_dataloader=dict(persistent_workers=True, ),
             test_dataloader=dict(persistent_workers=True, ),
             train=dict(type='RepeatDataset',
-                       times=4,
+                       times=1,
                        dataset=dict(
                            type='CIFAR100FSCILDataset',
                            data_prefix='./data/cifar',
