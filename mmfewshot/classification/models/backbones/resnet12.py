@@ -92,18 +92,17 @@ class BasicBlock(nn.Module):
 
 @BACKBONES.register_module()
 class ResNet12(nn.Module):
-    """ResNet12.
+    """ResNet12 backbone for FSCIL with multi-scale feature support.
 
     Args:
-        block (nn.Module): Block to build layers. Default: :class:`BasicBlock`.
-        with_avgpool (bool): Whether to average pool the features.
-            Default: True.
-        pool_size (tuple(int,int)): The output shape of average pooling layer.
-            Default: (1, 1).
-        flatten (bool): Whether to flatten features from (N, C, H, W)
-            to (N, C*H*W). Default: True.
+        block (nn.Module): Basic block type. Default: BasicBlock.
+        with_avgpool (bool): Apply global avgpool at the end. Default: True.
+        pool_size (tuple(int,int)): Adaptive pooling size. Default: (1, 1).
+        flatten (bool): Flatten output. Default: True.
         drop_rate (float): Dropout rate. Default: 0.0.
-        drop_block_size (int): Size of drop block. Default: 5.
+        drop_block_size (int): Size of DropBlock. Default: 5.
+        keep_res (bool): If True, keep resolution in layer4. Default: False.
+        out_indices (tuple[int]): Which stage outputs to return. Default: (0,1,2,3).
     """
 
     def __init__(
@@ -114,31 +113,37 @@ class ResNet12(nn.Module):
         flatten: bool = True,
         drop_rate: float = 0.0,
         drop_block_size: int = 5,
-        keep_res=False,
+        keep_res: bool = False,
+        out_indices: Tuple[int] = (0, 1, 2, 3),
     ) -> None:
-        self.in_channels = 3
         super().__init__()
+        self.in_channels = 3
+        self.out_indices = out_indices
 
-        self.layer1 = self._make_layer(block,
-                                       64,
-                                       stride=2,
-                                       drop_rate=drop_rate)
-        self.layer2 = self._make_layer(block,
-                                       160,
-                                       stride=2,
-                                       drop_rate=drop_rate)
-        self.layer3 = self._make_layer(block,
-                                       320,
-                                       stride=2,
-                                       drop_rate=drop_rate,
-                                       drop_block=True,
-                                       block_size=drop_block_size)
-        self.layer4 = self._make_layer(block,
-                                       640,
-                                       stride=2 if not keep_res else 1,
-                                       drop_rate=drop_rate,
-                                       drop_block=True,
-                                       block_size=drop_block_size)
+        # Define 4 stages
+        self.layer1 = self._make_layer(
+            block, 64, stride=2, drop_rate=drop_rate
+        )
+        self.layer2 = self._make_layer(
+            block, 160, stride=2, drop_rate=drop_rate
+        )
+        self.layer3 = self._make_layer(
+            block,
+            320,
+            stride=2,
+            drop_rate=drop_rate,
+            drop_block=True,
+            block_size=drop_block_size,
+        )
+        self.layer4 = self._make_layer(
+            block,
+            640,
+            stride=2 if not keep_res else 1,
+            drop_rate=drop_rate,
+            drop_block=True,
+            block_size=drop_block_size,
+        )
+
         self.with_avgpool = with_avgpool
         if with_avgpool:
             self.avgpool = nn.AdaptiveAvgPool2d(pool_size)
@@ -146,27 +151,38 @@ class ResNet12(nn.Module):
         self.flatten = flatten
         self.num_batches_tracked = 0
 
-    def _make_layer(self,
-                    block: nn.Module,
-                    out_channels: int,
-                    stride: int = 1,
-                    drop_rate: float = 0.0,
-                    drop_block: bool = False,
-                    block_size: int = 1) -> nn.Sequential:
+    def _make_layer(
+        self,
+        block: nn.Module,
+        out_channels: int,
+        stride: int = 1,
+        drop_rate: float = 0.0,
+        drop_block: bool = False,
+        block_size: int = 1,
+    ) -> nn.Sequential:
         downsample = None
         if stride != 1 or self.in_channels != out_channels * block.expansion:
             downsample = nn.Sequential(
-                nn.Conv2d(self.in_channels,
-                          out_channels * block.expansion,
-                          kernel_size=1,
-                          stride=1,
-                          bias=False),
+                nn.Conv2d(
+                    self.in_channels,
+                    out_channels * block.expansion,
+                    kernel_size=1,
+                    stride=1,
+                    bias=False,
+                ),
                 nn.BatchNorm2d(out_channels * block.expansion),
             )
 
         layers = [
-            block(self.in_channels, out_channels, stride, downsample,
-                  drop_rate, drop_block, block_size)
+            block(
+                self.in_channels,
+                out_channels,
+                stride,
+                downsample,
+                drop_rate,
+                drop_block,
+                block_size,
+            )
         ]
         self.in_channels = out_channels * block.expansion
 
@@ -175,20 +191,43 @@ class ResNet12(nn.Module):
     def init_weights(self) -> None:
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
-                nn.init.kaiming_normal_(m.weight,
-                                        mode='fan_out',
-                                        nonlinearity='leaky_relu')
+                nn.init.kaiming_normal_(
+                    m.weight, mode="fan_out", nonlinearity="leaky_relu"
+                )
             elif isinstance(m, nn.BatchNorm2d):
                 nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
 
-    def forward(self, x: Tensor) -> Tensor:
+    def forward(self, x: Tensor):
+        """Forward pass.
+        Returns:
+            - If single out_index: single feature map
+            - If multiple out_indices: tuple of feature maps
+        """
+        outs = []
+
         x = self.layer1(x)
+        if 0 in self.out_indices:
+            outs.append(x)
+
         x = self.layer2(x)
+        if 1 in self.out_indices:
+            outs.append(x)
+
         x = self.layer3(x)
+        if 2 in self.out_indices:
+            outs.append(x)
+
         x = self.layer4(x)
+        if 3 in self.out_indices:
+            outs.append(x)
+
         if self.with_avgpool:
             x = self.avgpool(x)
         if self.flatten:
             x = x.view(x.size(0), -1)
-        return x
+
+        if len(self.out_indices) == 1:
+            return outs[-1]   # single feature map
+        else:
+            return tuple(outs)   # ← list 대신 tuple 반환

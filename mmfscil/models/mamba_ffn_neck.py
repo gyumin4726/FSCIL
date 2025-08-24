@@ -284,13 +284,7 @@ class MambaNeck(BaseModule):
         self.key_proj = nn.Linear(out_channels, out_channels)
         self.value_proj = nn.Linear(out_channels, out_channels)
         
-        # Output projection for attention weights
-        self.attention_output = nn.Sequential(
-            nn.Linear(out_channels, out_channels // 2),
-            nn.ReLU(inplace=True),
-            nn.Linear(out_channels // 2, num_skip_sources),
-            nn.Softmax(dim=-1)
-        )
+
 
         if self.use_new_branch:
             if self.num_layers_new == 3:
@@ -569,38 +563,33 @@ class MambaNeck(BaseModule):
             # skip connection에도 추가
             skip_features.append(x_new)
 
-        # Cross-attention based skip connection fusion (MASC-M)
+        # Cross-attention based skip connection fusion (MASC-M, simplified)
         if len(skip_features) > 1:
             # Stack all skip features: [B, num_features, feature_dim]
-            skip_stack = torch.stack(skip_features, dim=1)  # [B, N, 1024]
+            skip_stack = torch.stack(skip_features, dim=1)  # [B, N, D]
             
             # Prepare Query (from Mamba output), Key, Value (from skip features)
-            query = self.query_proj(x).unsqueeze(1)  # [B, 1, 1024]
-            keys = self.key_proj(skip_stack)         # [B, N, 1024]
-            values = self.value_proj(skip_stack)     # [B, N, 1024]
+            query = self.query_proj(x).unsqueeze(1)  # [B, 1, D]
+            keys = self.key_proj(skip_stack)         # [B, N, D]
+            values = self.value_proj(skip_stack)     # [B, N, D]
             
             # Multi-head cross-attention
-            attended_features, attention_weights = self.cross_attention(
-                query, keys, values
-            )  # attended_features: [B, 1, 1024], attention_weights: [B, 1, N]
+            attended_features, attention_weights = self.cross_attention(query, keys, values)
+            # attention_weights: [B, 1, N]
             
-            # Generate final attention weights for each skip feature
-            final_attention_weights = self.attention_output(attended_features.squeeze(1))  # [B, N]
+            # softmax 정규화 (안정성 보강)
+            weights = torch.softmax(attention_weights.squeeze(1), dim=-1)  # [B, N]
             
-            # Apply attention weights to skip features
-            weighted_skip_features = []
-            for i, feat in enumerate(skip_features):
-                weight = final_attention_weights[:, i:i+1]  # [B, 1]
-                weighted_feat = weight * feat  # [B, 1] * [B, 1024] = [B, 1024]
-                weighted_skip_features.append(weighted_feat)
+            # Skip features에 가중치 적용
+            skip_stack = torch.stack(skip_features, dim=1)  # [B, N, D]
+            weighted_skip = (weights.unsqueeze(-1) * skip_stack).sum(dim=1)  # [B, D]
             
-            # Sum all weighted features
-            weighted_skip = sum(weighted_skip_features)
+            # 최종 출력
             final_output = x + 0.1 * weighted_skip
             
             # 디버깅: cross-attention weights 출력
             if hasattr(self, 'logger') and torch.rand(1).item() < 0.01:  # 1% 확률로 로그
-                weight_values = final_attention_weights[0].detach().cpu().numpy()
+                weight_values = weights[0].detach().cpu().numpy()
                 # Generate dynamic feature names based on actual skip features
                 feature_names = ['layer4(identity)']
                 if self.use_multi_scale_skip:
