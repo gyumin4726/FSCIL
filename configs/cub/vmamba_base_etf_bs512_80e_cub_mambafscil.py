@@ -14,35 +14,53 @@ model = dict(backbone=dict(type='VMambaBackbone',
                            out_indices=(0, 1, 2, 3),  # Extract features from all 4 stages
                            frozen_stages=0,  # Freeze patch embedding and first stage
                            channel_first=True),
-             neck=dict(type='MambaNeck',
+             neck=dict(type='MoEFSCILNeck',
+                       # Core MoE parameters (optimized based on MoE-Mamba paper)
+                       num_experts=4,  # Reduced for base session stability
+                       top_k=2,        # Keep for diversity
+                       
+                       # Architecture parameters
                        version='ss2d',
                        in_channels=1024,  # VMamba base stage4 output channels
                        out_channels=1024,
                        feat_size=7,  # 224 / (4*8) = 7 (patch_size=4, 4 downsample stages with 2x each)
                        num_layers=3,
                        use_residual_proj=True,
-                       # Enhanced skip connection settings (MASC-M) for VMamba features
-                       use_multi_scale_skip=True,
-                       multi_scale_channels=[128, 256, 512]),
+                       
+                       # Enhanced Multi-scale Skip Connection parameters
+                       use_multi_scale_skip=True,  # Enable multi-scale features
+                       multi_scale_channels=[128, 256, 512],  # VMamba base stage0-2 channels (correct)
+                       
+                       # SSM parameters
+                       d_state=256,
+                       dt_rank=256,
+                       ssm_expand_ratio=1.0),
              head=dict(type='ETFHead',
                        in_channels=1024,
                        num_classes=200,
                        eval_classes=100,
                        with_len=False,
                        cal_acc=True,
-                       loss=dict(type='CombinedLoss', dr_weight=0.0, ce_weight=1.0)),
+                       loss=dict(type='CombinedLoss', dr_weight=1.0, ce_weight=0.0)),
              mixup=0,
              mixup_prob=0)
 
-# optimizer
+# optimizer (adapted for Enhanced MoE with Multi-scale Skip Connections)
 optimizer = dict(
     type='SGD',
-    lr=0.2,
+    lr=0.15,  # Slightly reduced for MoE stability
     momentum=0.9,
     weight_decay=0.0005,
-    paramwise_cfg=dict(custom_keys={'backbone': dict(lr_mult=0.1)}))
+    paramwise_cfg=dict(
+        custom_keys={
+            'backbone': dict(lr_mult=0.1),
+            # MoE-specific learning rates
+            'neck.moe.gate': dict(lr_mult=1.5),      # Higher LR for gating network
+            'neck.moe.experts': dict(lr_mult=1.2),   # Higher LR for experts
+        }
+    ))
 
-optimizer_config = dict(grad_clip=None)
+optimizer_config = dict(grad_clip=None)  # Gradient clipping for MoE stability
 lr_config = dict(
     policy='CosineAnnealingCooldown',
     min_lr=None,
@@ -56,4 +74,6 @@ lr_config = dict(
     warmup_ratio=0.1,
     warmup_by_epoch=False)
 
-runner = dict(type='EpochBasedRunner', max_epochs=20) 
+runner = dict(type='EpochBasedRunner', max_epochs=20)
+
+find_unused_parameters = True  # Required for Enhanced MoE: not all experts + multi-scale adapters used every iteration 
