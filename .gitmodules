@@ -1,3 +1,6 @@
 [submodule "VMamba"]
 	path = VMamba
 	url = https://github.com/MzeroMiko/VMamba
+[submodule "MoE-Mamba"]
+	path = MoE-Mamba
+	url = https://github.com/kyegomez/MoE-Mamba
