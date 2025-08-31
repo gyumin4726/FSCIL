@@ -48,7 +48,7 @@ model = dict(backbone=dict(type='VMambaBackbone',
 # optimizer (adapted for Enhanced MoE with Multi-scale Skip Connections)
 optimizer = dict(
     type='SGD',
-    lr=0.15,  # Slightly reduced for MoE stability
+    lr=0.1,  # Slightly reduced for MoE stability
     momentum=0.9,
     weight_decay=0.0005,
     paramwise_cfg=dict(
@@ -76,4 +76,4 @@ lr_config = dict(
 
 runner = dict(type='EpochBasedRunner', max_epochs=20)
 
-find_unused_parameters = True  # Required for Enhanced MoE: not all experts + multi-scale adapters used every iteration 
+find_unused_parameters = True  # Required for Enhanced MoE: not all experts + multi-scale adapters used every iteration

@@ -59,14 +59,14 @@ optimizer = dict(type='SGD',
                  paramwise_cfg=dict(
                      custom_keys={
                          # Shared components (lower LR for stability)
-                         'neck.mlp_proj.': dict(lr_mult=0.2),
-                         'neck.ssm_block.': dict(lr_mult=0.2),
-                         'neck.residual_proj': dict(lr_mult=0.2),
-                         'neck.pos_embed': dict(lr_mult=0.2),
+                         'neck.mlp_proj.': dict(lr_mult=1.2),
+                         'neck.ssm_block.': dict(lr_mult=1.2),
+                         'neck.residual_proj': dict(lr_mult=1.2),
+                         'neck.pos_embed': dict(lr_mult=1.2),
                          
                          # MoE components (higher LR for adaptation)
-                         'neck.moe.gate': dict(lr_mult=2.0),      # Higher LR for gating network
-                         'neck.moe.experts': dict(lr_mult=1.5),   # Higher LR for experts
+                         'neck.moe.gate': dict(lr_mult=1.2),      # Higher LR for gating network
+                         'neck.moe.experts': dict(lr_mult=1.2),   # Higher LR for experts
                      }))
 
 optimizer_config = dict(grad_clip=None)  # Gradient clipping for MoE stability
