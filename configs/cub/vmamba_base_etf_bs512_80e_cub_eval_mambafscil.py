@@ -10,25 +10,20 @@ inc_step = 10
 
 # model settings
 model = dict(backbone=dict(type='VMambaBackbone',
-                           model_name='vmamba_base_s2l15',  # 모델 변경
+                           model_name='vmamba_base_s2l15',
                            pretrained_path='./vssm_base_0229_ckpt_epoch_237.pth',
-                           out_indices=(0, 1, 2, 3),  # Multi-scale features from all stages
-                           frozen_stages=0,  # Freeze patch embedding and first stage
+                           out_indices=(0, 1, 2, 3),
+                           frozen_stages=0,
                            channel_first=True),
              neck=dict(type='MoEFSCILNeck',
-                       # Core MoE parameters (optimized based on MoE-Mamba paper)
-                       num_experts=4,  # Balanced performance vs complexity
-                       top_k=2,        # Recommended for stability and diversity
-                       
-                       # Architecture parameters
+                       num_experts=4,
+                       top_k=2,
                        version='ss2d',
-                       in_channels=1024,  # VMamba base stage4 channels
+                       in_channels=1024,
                        out_channels=1024,
                        feat_size=7,
                        num_layers=3,
                        use_residual_proj=True,
-                       
-                       # SSM parameters
                        d_state=256,
                        dt_rank=256,
                        ssm_expand_ratio=1.0,
@@ -58,18 +53,15 @@ optimizer = dict(type='SGD',
                  weight_decay=0.0005,
                  paramwise_cfg=dict(
                      custom_keys={
-                         # Shared components (lower LR for stability)
                          'neck.mlp_proj.': dict(lr_mult=1.2),
                          'neck.ssm_block.': dict(lr_mult=1.2),
                          'neck.residual_proj': dict(lr_mult=1.2),
                          'neck.pos_embed': dict(lr_mult=1.2),
-                         
-                         # MoE components (higher LR for adaptation)
-                         'neck.moe.gate': dict(lr_mult=1.2),      # Higher LR for gating network
-                         'neck.moe.experts': dict(lr_mult=1.2),   # Higher LR for experts
+                         'neck.moe.gate': dict(lr_mult=1.2),     
+                         'neck.moe.experts': dict(lr_mult=1.2),  
                      }))
 
-optimizer_config = dict(grad_clip=None)  # Gradient clipping for MoE stability
+optimizer_config = dict(grad_clip=None)
 
 lr_config = dict(
     policy='CosineAnnealingCooldown',
