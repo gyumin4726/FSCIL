@@ -454,12 +454,11 @@ class MoEFSCILNeck(BaseModule):
         
         # Logger
         self.logger = get_root_logger()
-        self.logger.info(f"🚀 MoE-FSCIL Neck initialized: {num_experts} experts, top-{top_k} activation")
-        self.logger.info(f"📊 Replacing branch structure with MoE for scalable FSCIL")
+        self.logger.info(f"MoE-FSCIL Neck initialized: {num_experts} experts, top-{top_k} activation")
         
         if self.use_multi_scale_skip:
-            self.logger.info(f"🔗 Enhanced MoE with Multi-Scale Skip Connections: {len(self.multi_scale_channels)} layers")
-            self.logger.info(f"📡 Multi-Scale SS2D Adapters: {self.multi_scale_channels} → {out_channels} channels")
+            self.logger.info(f"Enhanced MoE with Multi-Scale Skip Connections: {len(self.multi_scale_channels)} layers")
+            self.logger.info(f"Multi-Scale SS2D Adapters: {self.multi_scale_channels} → {out_channels} channels")
         
         # Global average pooling
         self.avg = nn.AdaptiveAvgPool2d((1, 1))

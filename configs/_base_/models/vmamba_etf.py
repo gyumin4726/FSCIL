@@ -3,21 +3,20 @@ model = dict(
     type='ImageClassifierCIL',
     backbone=dict(
         type='VMambaBackbone',
-        model_name='vmamba_tiny_s1l8',  # VMamba Tiny model name for MambaNeck
-        pretrained_path='./vssm1_tiny_0230s_ckpt_epoch_264.pth',  # VMamba Tiny pretrained weights
-        out_indices=(0, 1, 2, 3),  # Multi-scale feature extraction
-        frozen_stages=1,  # Freeze first stage to prevent overfitting
+        model_name='vmamba_base_s2l15', 
+        pretrained_path='./vssm_base_0229_ckpt_epoch_237.pth',
+        out_indices=(0, 1, 2, 3),  
+        frozen_stages=0,
         channel_first=True,
     ),
     neck=dict(
         type='MambaNeck',
         in_channels=1024,  # VMamba base final layer channels
         out_channels=1024,
-        feat_size=7,  # 224/32 = 7 (after 4 downsample stages)
+        feat_size=7,
         num_layers=2,
         use_residual_proj=True,
-        # Enhanced skip connection settings for VMamba multi-scale features
-        use_multi_scale_skip=True,
+        use_multi_scale_skip=False,
         multi_scale_channels=[128, 256, 512],  # VMamba base: [128, 256, 512, 1024]
         d_state=256,
         ssm_expand_ratio=1.0,
