@@ -121,7 +121,8 @@ class FSCILGate(nn.Module):
                  top_k: int = 1,
                  capacity_factor: float = 1.25,
                  epsilon: float = 1e-6,
-                 use_aux_loss: bool = True):
+                 use_aux_loss: bool = True,
+                 aux_loss_weight: float = 0.01):
         super().__init__()
         self.dim = dim
         self.num_experts = num_experts
@@ -129,6 +130,7 @@ class FSCILGate(nn.Module):
         self.capacity_factor = capacity_factor
         self.epsilon = epsilon
         self.use_aux_loss = use_aux_loss
+        self.aux_loss_weight = aux_loss_weight
         
         # Simple gating network (following official implementation)
         self.w_gate = nn.Linear(dim, num_experts)
@@ -173,7 +175,7 @@ class FSCILGate(nn.Module):
             
             # load balancing loss: 진짜 "soft vs hard" 분포 비교!
             # raw_gate_scores vs actual selection으로 제대로 된 load balancing
-            aux_loss = 0.01 * ((load - importance) ** 2).mean()  # 가중치 0.01로 약화
+            aux_loss = self.aux_loss_weight * ((load - importance) ** 2).mean()
         
         return gate_scores, aux_loss
     
@@ -264,7 +266,8 @@ class MoEFSCIL(nn.Module):
                  capacity_factor=1.25,
                  d_state=256,
                  dt_rank=256,
-                 ssm_expand_ratio=1.0):
+                 ssm_expand_ratio=1.0,
+                 aux_loss_weight=0.01):
         super().__init__()
         self.dim = dim
         self.num_experts = num_experts
@@ -275,7 +278,8 @@ class MoEFSCIL(nn.Module):
             dim=dim,
             num_experts=num_experts,
             top_k=top_k,
-            capacity_factor=capacity_factor
+            capacity_factor=capacity_factor,
+            aux_loss_weight=aux_loss_weight
         )
         
         # Create expert modules (pure FFN, following official MoE-Mamba)
@@ -357,6 +361,8 @@ class MoEFSCILNeck(BaseModule):
         num_layers (int): Number of MLP layers
         use_multi_scale_skip (bool): Whether to use multi-scale skip connections
         multi_scale_channels (list): Channel dimensions for multi-scale features
+        # MoE auxiliary loss parameters
+        aux_loss_weight (float): Weight for auxiliary loss in load balancing (default: 0.01)
         
         # Note: Traditional FSCIL regularization losses are replaced by MoE load balancing
     """
@@ -383,7 +389,9 @@ class MoEFSCILNeck(BaseModule):
                  param_avg_dim='0-1-3',
                  # Multi-scale skip connection parameters
                  use_multi_scale_skip=False,
-                 multi_scale_channels=[128, 256, 512]):
+                 multi_scale_channels=[128, 256, 512],
+                 # MoE auxiliary loss parameters
+                 aux_loss_weight=0.01):
         super(MoEFSCILNeck, self).__init__(init_cfg=None)
         
         # Core parameters
@@ -488,7 +496,8 @@ class MoEFSCILNeck(BaseModule):
             feat_size=feat_size,
             d_state=d_state,
             dt_rank=dt_rank if dt_rank is not None else d_state,
-            ssm_expand_ratio=ssm_expand_ratio
+            ssm_expand_ratio=ssm_expand_ratio,
+            aux_loss_weight=aux_loss_weight
         )
         
         
@@ -603,7 +612,7 @@ class MoEFSCILNeck(BaseModule):
                         
                         # Log adapter usage for debugging
                         if hasattr(self, 'logger') and torch.rand(1).item() < 0.01:  # 1% 확률로 로그
-                            self.logger.info(f"MoE MLP Adapter {i}: {feat.shape} → {adapted_feat.shape}")
+                            self.logger.info(f"MultiScaleAdapter {i}: {feat.shape} → {adapted_feat.shape}")
 
         # Cross-attention based skip connection fusion (Enhanced MoE)
         if self.use_multi_scale_skip and len(skip_features) > 1:
@@ -663,7 +672,6 @@ class MoEFSCILNeck(BaseModule):
                 feature_names = feature_names[:len(skip_features)]
                 weight_info = ', '.join([f"{name}: {val:.3f}" for name, val in zip(feature_names, weight_values)])
                 self.logger.info(f"Cross-attention weights: {weight_info}")
-                self.logger.info(f"Skip SS2D processing: {weighted_skip.shape} -> {skip_ss2d_output.shape}")
         else:
             # Simple residual connection (when multi-scale is not used)
             final_output = moe_output + identity_proj
