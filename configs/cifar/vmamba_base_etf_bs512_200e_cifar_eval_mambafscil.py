@@ -21,7 +21,6 @@ model = dict(backbone=dict(type='VMambaBackbone',
                        out_channels=1024,
                        feat_size=1,  # 실제 출력 크기에 맞게 수정 (5×5)
                        num_layers=3,
-                       use_residual_proj=True,
                        use_new_branch=True,
                        detach_residual=False,
                        num_layers_new=3,

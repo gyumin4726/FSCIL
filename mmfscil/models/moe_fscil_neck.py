@@ -393,7 +393,6 @@ class MoEFSCILNeck(BaseModule):
         feat_size (int): Spatial size of input features
         mid_channels (int): Intermediate channels in MLP projection
         num_layers (int): Number of MLP layers
-        use_residual_proj (bool): Whether to use residual projection
         use_multi_scale_skip (bool): Whether to use multi-scale skip connections
         multi_scale_channels (list): Channel dimensions for multi-scale features
         
@@ -412,7 +411,6 @@ class MoEFSCILNeck(BaseModule):
                  feat_size=2,
                  mid_channels=None,
                  num_layers=2,
-                 use_residual_proj=False,
                  # FSCIL suppression loss parameters
                  loss_weight_supp=0.0,
                  loss_weight_supp_novel=0.0,
@@ -435,7 +433,6 @@ class MoEFSCILNeck(BaseModule):
         self.feat_size = feat_size
         self.mid_channels = in_channels * 2 if mid_channels is None else mid_channels
         self.num_layers = num_layers
-        self.use_residual_proj = use_residual_proj
         
         # Multi-scale skip connection parameters
         self.use_multi_scale_skip = use_multi_scale_skip
@@ -522,13 +519,6 @@ class MoEFSCILNeck(BaseModule):
             ssm_expand_ratio=ssm_expand_ratio
         )
         
-        # Residual projection
-        if self.use_residual_proj:
-            self.residual_proj = nn.Sequential(
-                OrderedDict([
-                    ('proj', nn.Linear(in_channels, out_channels, bias=False)),
-                ])
-            )
         
         self.init_weights()
         
@@ -608,10 +598,7 @@ class MoEFSCILNeck(BaseModule):
         outputs = {}
         
         # Prepare residual connection
-        if self.use_residual_proj:
-            identity_proj = self.residual_proj(self.avg(identity).view(B, -1))
-        else:
-            identity_proj = self.avg(identity).view(B, -1)
+        identity_proj = self.avg(identity).view(B, -1)
         
         # MLP projection (following original MambaNeck pattern)
         x_proj = self.mlp_proj(identity)  # [B, out_channels, H, W]

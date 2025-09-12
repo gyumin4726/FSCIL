@@ -11,7 +11,6 @@ model = dict(neck=dict(type='MambaNeck',
                        out_channels=512,
                        feat_size=5,  # 224 / (4*8) = 7 (patch_size=4, 4 downsample stages with 2x each)
                        num_layers=2,
-                       use_residual_proj=True,
                        # Enhanced skip connection settings (MASC-M) for VMamba features
                        use_multi_scale_skip=True,
                        multi_scale_channels=[64, 160, 320]),
