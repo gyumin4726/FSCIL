@@ -147,12 +147,17 @@ class ImageClassifierCIL(BaseClassifier):
             dts_new = x.get('dts_new')
             Bs_new = x.get('Bs_new')
             Cs_new = x.get('Cs_new')
+            aux_loss = x.get('aux_loss')  # MoE load balancing loss
             x = x['out']
 
         losses = dict()
         if self.mixup == 0.:
             loss = self.head.forward_train(x, gt_label)
             losses.update(loss)
+            
+        # Add MoE auxiliary loss for load balancing
+        if aux_loss is not None:
+            losses['aux_loss'] = aux_loss
 
         # make sure not mixup feat
         if gt_label_aux is not None:
