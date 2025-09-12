@@ -137,13 +137,12 @@ class FSCILGate(nn.Module):
         
         # Removed session embedding for base session stability
         
-    def forward(self, x: torch.Tensor, training_phase: str = 'base'):
+    def forward(self, x: torch.Tensor):
         """
         Forward pass following official SwitchGate pattern with FSCIL adaptations.
         
         Args:
             x: Input features [B, dim] (flattened for gating)
-            training_phase: 'base' or 'incremental' for session-aware routing
             
         Returns:
             gate_scores: Expert selection probabilities [B, num_experts]
@@ -295,13 +294,12 @@ class MoEFSCIL(nn.Module):
             for i in range(num_experts)
         ])
         
-    def forward(self, x, training_phase='base'):
+    def forward(self, x):
         """
         SS2D MoE forward pass with FSCIL-specific routing.
         
         Args:
             x: Input features [B, H, W, dim] (spatial features for SS2D experts)
-            training_phase: 'base' or 'incremental'
             
         Returns:
             output: Mixed expert outputs [B, dim]
@@ -313,7 +311,7 @@ class MoEFSCIL(nn.Module):
         x_flat = F.adaptive_avg_pool2d(x.permute(0, 3, 1, 2), (1, 1)).view(B, -1)  # [B, dim]
         
         # Get expert selection probabilities and routing mask
-        gate_scores, aux_loss = self.gate(x_flat, training_phase)  # [B, num_experts]
+        gate_scores, aux_loss = self.gate(x_flat)  # [B, num_experts]
         
         # Find top-k experts for each token (efficient sparse routing)
         top_k_scores, top_k_indices = gate_scores.topk(self.top_k, dim=-1)  # [B, top_k]
@@ -540,7 +538,7 @@ class MoEFSCILNeck(BaseModule):
                         self.skip_ss2d.in_proj.weight.data *= 0.1
                 self.logger.info('Initialized shared skip SS2D block for weighted feature processing')
     
-    def forward(self, x, multi_scale_features=None, training_phase='base'):
+    def forward(self, x, multi_scale_features=None):
         """
         Enhanced forward pass with MoE processing and multi-scale skip connections.
         
@@ -548,7 +546,6 @@ class MoEFSCILNeck(BaseModule):
             x: Input tensor [B, C, H, W] or tuple (layer1, layer2, layer3, layer4)
             multi_scale_features (list, optional): List of features from different backbone layers
                                                   [layer1_feat, layer2_feat, layer3_feat]
-            training_phase: 'base' or 'incremental' for session-aware processing
             
         Returns:
             dict: Output dictionary containing:
@@ -589,7 +586,7 @@ class MoEFSCILNeck(BaseModule):
         x_spatial = x_proj.view(B, H, W, -1)  # [B, H, W, out_channels]
         
         # SS2D MoE processing (each expert has its own SS2D block)
-        moe_output, aux_loss = self.moe(x_spatial, training_phase=training_phase)
+        moe_output, aux_loss = self.moe(x_spatial)
         
         # Initialize final output with MoE result
         final_output = moe_output
