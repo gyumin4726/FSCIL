@@ -6,7 +6,6 @@ _base_ = [
 
 # model settings
 model = dict(neck=dict(type='MambaNeck',
-                       version='ssm',
                        in_channels=640,  # VMamba base stage4 output channels
                        out_channels=512,
                        feat_size=5,  # 224 / (4*8) = 7 (patch_size=4, 4 downsample stages with 2x each)

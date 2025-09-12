@@ -6,7 +6,6 @@ _base_ = [
 
 # model settings
 model = dict(neck=dict(type='MambaNeck',
-                       version='ssm',
                        in_channels=640,
                        out_channels=512,
                        feat_size=5,

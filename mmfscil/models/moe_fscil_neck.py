@@ -352,7 +352,6 @@ class MoEFSCILNeck(BaseModule):
         out_channels (int): Number of output channels
         num_experts (int): Number of expert modules (replaces branch count)
         top_k (int): Number of experts to activate per input
-        version (str): 'ssm' or 'ss2d' for state space modeling
         d_state (int): Dimension of hidden state in SSM
         dt_rank (int): Dimension rank in SSM
         ssm_expand_ratio (float): Expansion ratio for SSM blocks
@@ -372,7 +371,6 @@ class MoEFSCILNeck(BaseModule):
                  out_channels=512,
                  num_experts=4,
                  top_k=2,
-                 version='ss2d',
                  d_state=256,
                  dt_rank=None,
                  ssm_expand_ratio=1.0,
@@ -399,7 +397,6 @@ class MoEFSCILNeck(BaseModule):
         self.out_channels = out_channels
         self.num_experts = num_experts
         self.top_k = top_k
-        self.version = version
         self.feat_size = feat_size
         self.mid_channels = in_channels * 2 if mid_channels is None else mid_channels
         self.num_layers = num_layers

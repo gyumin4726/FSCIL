@@ -15,7 +15,6 @@ model = dict(backbone=dict(type='VMambaBackbone',
                            frozen_stages=0,  # Freeze patch embedding and first stage
                            channel_first=True),
              neck=dict(type='MambaNeck',
-                       version='ss2d',
                        in_channels=1024,  # VMamba base stage4 output channels
                        out_channels=1024,
                        feat_size=1,  # 실제 출력 크기에 맞게 수정 (5×5)
