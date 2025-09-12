@@ -28,20 +28,17 @@ from .mamba_ssm.modules.mamba_simple import Mamba
 from .ss2d import SS2D
 
 
-class MultiScaleSS2DAdapter(BaseModule):
-    """SS2D-based Multi-Scale Feature Adapter for MoE-FSCIL.
+class MultiScaleAdapter(BaseModule):
+    """Simple MLP-based Multi-Scale Feature Adapter for MoE-FSCIL.
     
     This adapter processes multi-scale features from different backbone layers
-    using SS2D blocks for enhanced feature representation, following the same
-    pattern as MambaNeck.
+    using only MLP projections (no SS2D). SS2D processing will be applied
+    after weighted combination of all features.
     
     Args:
         in_channels (int): Number of input channels from backbone layer.
         out_channels (int): Number of output channels (typically 512).
         feat_size (int): Spatial size after adaptive pooling.
-        d_state (int): Dimension of the hidden state in SS2D.
-        dt_rank (int): Dimension rank in SS2D.
-        ssm_expand_ratio (float): Expansion ratio for SS2D block.
         num_layers (int): Number of layers in the MLP projections.
         mid_channels (int, optional): Number of intermediate channels in MLP projections.
     """
@@ -50,12 +47,9 @@ class MultiScaleSS2DAdapter(BaseModule):
                  in_channels,
                  out_channels=512,
                  feat_size=7,
-                 d_state=256,
-                 dt_rank=256,
-                 ssm_expand_ratio=1.0,
                  num_layers=2,
                  mid_channels=None):
-        super(MultiScaleSS2DAdapter, self).__init__(init_cfg=None)
+        super(MultiScaleAdapter, self).__init__(init_cfg=None)
         
         self.in_channels = in_channels
         self.out_channels = out_channels
@@ -66,32 +60,14 @@ class MultiScaleSS2DAdapter(BaseModule):
         # 1. Spatial size unification
         self.spatial_adapter = nn.AdaptiveAvgPool2d((feat_size, feat_size))
         
-        # 2. Enhanced MLP projection (same as MambaNeck)
+        # 2. Simple MLP projection (no SS2D)
         self.mlp_proj = self._build_mlp(in_channels, out_channels, self.mid_channels, num_layers, feat_size)
         
-        # 3. SS2D block for sequence modeling
-        directions = ('h', 'h_flip', 'v', 'v_flip')
-        self.ss2d_block = SS2D(
-            out_channels,
-            ssm_ratio=ssm_expand_ratio,
-            d_state=d_state,
-            dt_rank=dt_rank,
-            directions=directions,
-            use_out_proj=False,
-            use_out_norm=True
-        )
-        
-        # 4. Positional embeddings for SS2D
-        self.pos_embed = nn.Parameter(
-            torch.zeros(1, feat_size * feat_size, out_channels)
-        )
-        trunc_normal_(self.pos_embed, std=.02)
-        
-        # 5. Final pooling
+        # 3. Final pooling
         self.final_pool = nn.AdaptiveAvgPool2d((1, 1))
         
     def _build_mlp(self, in_channels, out_channels, mid_channels, num_layers, feat_size):
-        """Build MLP projection layers (same as MoEFSCILNeck)."""
+        """Build MLP projection layers."""
         layers = []
         layers.append(nn.Conv2d(in_channels, mid_channels, kernel_size=1, padding=0, bias=True))
         layers.append(build_norm_layer(dict(type='LN'), [mid_channels, feat_size, feat_size])[1])
@@ -106,7 +82,7 @@ class MultiScaleSS2DAdapter(BaseModule):
         return nn.Sequential(*layers)
         
     def forward(self, x):
-        """Forward pass of Multi-Scale SS2D Adapter.
+        """Forward pass of Multi-Scale MLP Adapter.
         
         Args:
             x (Tensor): Input feature tensor (B, in_channels, H, W)
@@ -119,24 +95,10 @@ class MultiScaleSS2DAdapter(BaseModule):
         # Step 1: Spatial size unification
         x = self.spatial_adapter(x)  # (B, C, feat_size, feat_size)
         
-        # Step 2: Enhanced MLP projection (same as MoEFSCILNeck)
+        # Step 2: MLP projection only (no SS2D)
         x = self.mlp_proj(x)         # (B, out_channels, feat_size, feat_size)
         
-        # Step 3: Prepare for SS2D processing
-        x = x.permute(0, 2, 3, 1)    # (B, feat_size, feat_size, out_channels)
-        x = x.view(B, self.feat_size * self.feat_size, -1)  # (B, feat_size^2, out_channels)
-        
-        # Add positional embeddings
-        x = x + self.pos_embed       # (B, feat_size^2, out_channels)
-        
-        # Reshape back for SS2D
-        x = x.view(B, self.feat_size, self.feat_size, -1)  # (B, feat_size, feat_size, out_channels)
-        
-        # Step 4: SS2D processing for sequence modeling
-        x, _ = self.ss2d_block(x)    # (B, feat_size, feat_size, out_channels)
-        
-        # Step 5: Convert back to spatial format and pool
-        x = x.permute(0, 3, 1, 2)    # (B, out_channels, feat_size, feat_size)
+        # Step 3: Final pooling
         x = self.final_pool(x)       # (B, out_channels, 1, 1)
         x = x.view(B, -1)            # (B, out_channels)
         
@@ -455,7 +417,8 @@ class MoEFSCILNeck(BaseModule):
         
         if self.use_multi_scale_skip:
             self.logger.info(f"Enhanced MoE with Multi-Scale Skip Connections: {len(self.multi_scale_channels)} layers")
-            self.logger.info(f"Multi-Scale SS2D Adapters: {self.multi_scale_channels} → {out_channels} channels")
+            self.logger.info(f"Multi-Scale Adapters: {self.multi_scale_channels} → {out_channels} channels")
+            self.logger.info(f"Shared SS2D for skip connection processing after weighted combination")
         
         # Global average pooling
         self.avg = nn.AdaptiveAvgPool2d((1, 1))
@@ -471,22 +434,31 @@ class MoEFSCILNeck(BaseModule):
         )
         trunc_normal_(self.pos_embed, std=.02)
         
-        # Multi-scale skip connection adapters
+        # Multi-scale skip connection adapters (MLP only, no SS2D)
         if self.use_multi_scale_skip:
             self.multi_scale_adapters = nn.ModuleList()
             for ch in self.multi_scale_channels:
-                # SS2D 기반 Multi-Scale Adapter (same preprocessing as MoEFSCILNeck)
-                adapter = MultiScaleSS2DAdapter(
+                # Simple MLP-based Multi-Scale Adapter (no SS2D)
+                adapter = MultiScaleAdapter(
                     in_channels=ch,
                     out_channels=out_channels,
                     feat_size=self.feat_size,
-                    d_state=d_state,
-                    dt_rank=dt_rank if dt_rank is not None else d_state,
-                    ssm_expand_ratio=ssm_expand_ratio,
                     num_layers=self.num_layers,  # Use same num_layers as main MoEFSCILNeck
                     mid_channels=ch * 2  # Adaptive mid_channels based on input channels
                 )
                 self.multi_scale_adapters.append(adapter)
+            
+            # Shared SS2D block for skip connection processing
+            directions = ('h', 'h_flip', 'v', 'v_flip')
+            self.skip_ss2d = SS2D(
+                out_channels,
+                ssm_ratio=ssm_expand_ratio,
+                d_state=d_state,
+                dt_rank=dt_rank if dt_rank is not None else d_state,
+                directions=directions,
+                use_out_proj=False,
+                use_out_norm=True
+            )
         
         # Cross-attention based skip connection weighting (when multi-scale is enabled)
         if self.use_multi_scale_skip:
@@ -543,24 +515,24 @@ class MoEFSCILNeck(BaseModule):
         """Initialize weights with proper scaling for MoE and multi-scale adapters."""
         self.logger.info("🔧 Initializing MoE-FSCIL Neck weights...")
         
-        # Initialize multi-scale SS2D adapters
+        # Initialize multi-scale MLP adapters
         if self.use_multi_scale_skip:
             for i, adapter in enumerate(self.multi_scale_adapters):
-                # Initialize MLP projection layers (same as MoEFSCILNeck)
+                # Initialize MLP projection layers
                 if hasattr(adapter, 'mlp_proj'):
                     # Initialize first Conv2d layer in MLP
                     first_layer = adapter.mlp_proj[0]  # First Conv2d layer
                     if isinstance(first_layer, nn.Conv2d):
                         nn.init.kaiming_normal_(first_layer.weight, mode='fan_out', nonlinearity='relu')
                 
-                # Initialize SS2D blocks with small weights for stability
-                if hasattr(adapter, 'ss2d_block'):
-                    # Initialize input projection with smaller weights
-                    with torch.no_grad():
-                        if hasattr(adapter.ss2d_block, 'in_proj'):
-                            adapter.ss2d_block.in_proj.weight.data *= 0.1
-                
-                self.logger.info(f'Initialized MultiScaleSS2DAdapter {i} for channel {self.multi_scale_channels[i]} with {adapter.num_layers}-layer MLP')
+                self.logger.info(f'Initialized MultiScaleAdapter {i} for channel {self.multi_scale_channels[i]} with {adapter.num_layers}-layer MLP')
+            
+            # Initialize shared skip SS2D block
+            if hasattr(self, 'skip_ss2d'):
+                with torch.no_grad():
+                    if hasattr(self.skip_ss2d, 'in_proj'):
+                        self.skip_ss2d.in_proj.weight.data *= 0.1
+                self.logger.info('Initialized shared skip SS2D block for weighted feature processing')
     
     def forward(self, x, multi_scale_features=None, training_phase='base'):
         """
@@ -625,13 +597,13 @@ class MoEFSCILNeck(BaseModule):
                 # Use actual multi-scale features when available
                 for i, feat in enumerate(multi_scale_features):
                     if i < len(self.multi_scale_adapters):
-                        # SS2D-based adapter processing (same as MambaNeck)
+                        # MLP-based adapter processing (no SS2D)
                         adapted_feat = self.multi_scale_adapters[i](feat)  # (B, out_channels)
                         skip_features.append(adapted_feat)
                         
                         # Log adapter usage for debugging
                         if hasattr(self, 'logger') and torch.rand(1).item() < 0.01:  # 1% 확률로 로그
-                            self.logger.info(f"MoE SS2D Adapter {i}: {feat.shape} → {adapted_feat.shape}")
+                            self.logger.info(f"MoE MLP Adapter {i}: {feat.shape} → {adapted_feat.shape}")
 
         # Cross-attention based skip connection fusion (Enhanced MoE)
         if self.use_multi_scale_skip and len(skip_features) > 1:
@@ -654,8 +626,32 @@ class MoEFSCILNeck(BaseModule):
             skip_stack = torch.stack(skip_features, dim=1)  # [B, N, D]
             weighted_skip = (weights.unsqueeze(-1) * skip_stack).sum(dim=1)  # [B, D]
             
-            # 최종 출력: MoE + weighted skip connections
-            final_output = moe_output + 0.1 * weighted_skip
+            # NEW: Apply shared SS2D to weighted skip features
+            # Reshape for SS2D processing: [B, D] -> [B, H, W, D]
+            B_skip, D_skip = weighted_skip.shape
+            H_skip = W_skip = int((D_skip // self.out_channels) ** 0.5)
+            if H_skip * W_skip * self.out_channels != D_skip:
+                # If not perfect square, use feat_size
+                H_skip = W_skip = self.feat_size
+                # Pad or truncate to fit
+                if D_skip > H_skip * W_skip * self.out_channels:
+                    weighted_skip = weighted_skip[:, :H_skip * W_skip * self.out_channels]
+                else:
+                    padding = H_skip * W_skip * self.out_channels - D_skip
+                    weighted_skip = F.pad(weighted_skip, (0, padding))
+            
+            # Reshape to spatial format for SS2D
+            weighted_skip_spatial = weighted_skip.view(B_skip, H_skip, W_skip, self.out_channels)
+            
+            # Apply shared SS2D to weighted skip features
+            skip_ss2d_output, _ = self.skip_ss2d(weighted_skip_spatial)  # [B, H, W, D]
+            
+            # Convert back to vector format
+            skip_ss2d_output = skip_ss2d_output.permute(0, 3, 1, 2)  # [B, D, H, W]
+            skip_ss2d_output = F.adaptive_avg_pool2d(skip_ss2d_output, (1, 1)).view(B_skip, -1)  # [B, D]
+            
+            # 최종 출력: MoE + SS2D-processed skip connections
+            final_output = moe_output + 0.1 * skip_ss2d_output
             
             # 디버깅: cross-attention weights 출력 (MambaNeck과 동일한 형식)
             if hasattr(self, 'logger') and torch.rand(1).item() < 0.01:  # 1% 확률로 로그
@@ -667,6 +663,7 @@ class MoEFSCILNeck(BaseModule):
                 feature_names = feature_names[:len(skip_features)]
                 weight_info = ', '.join([f"{name}: {val:.3f}" for name, val in zip(feature_names, weight_values)])
                 self.logger.info(f"Cross-attention weights: {weight_info}")
+                self.logger.info(f"Skip SS2D processing: {weighted_skip.shape} -> {skip_ss2d_output.shape}")
         else:
             # Simple residual connection (when multi-scale is not used)
             final_output = moe_output + identity_proj
