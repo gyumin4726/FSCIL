@@ -11,12 +11,12 @@ model = dict(
     ),
     neck=dict(
         type='MambaNeck',
-        in_channels=1024,  # VMamba base final layer channels
+        in_channels=1024,
         out_channels=1024,
         feat_size=7,
         num_layers=2,
         use_multi_scale_skip=False,
-        multi_scale_channels=[128, 256, 512],  # VMamba base: [128, 256, 512, 1024]
+        multi_scale_channels=[128, 256, 512],
         d_state=256,
         ssm_expand_ratio=1.0,
     ),

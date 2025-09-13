@@ -60,7 +60,7 @@ class MultiScaleAdapter(BaseModule):
         # 1. Spatial size unification
         self.spatial_adapter = nn.AdaptiveAvgPool2d((feat_size, feat_size))
         
-        # 2. Simple MLP projection (no SS2D)
+        # 2. Simple MLP projection
         self.mlp_proj = self._build_mlp(in_channels, out_channels, self.mid_channels, num_layers, feat_size)
         
         # 3. Final pooling
@@ -95,7 +95,7 @@ class MultiScaleAdapter(BaseModule):
         # Step 1: Spatial size unification
         x = self.spatial_adapter(x)  # (B, C, feat_size, feat_size)
         
-        # Step 2: MLP projection only (no SS2D)
+        # Step 2: MLP projection
         x = self.mlp_proj(x)         # (B, out_channels, feat_size, feat_size)
         
         # Step 3: Final pooling
@@ -134,8 +134,7 @@ class FSCILGate(nn.Module):
         
         # Simple gating network (following official implementation)
         self.w_gate = nn.Linear(dim, num_experts)
-        
-        # Removed session embedding for base session stability
+
         
     def forward(self, x: torch.Tensor):
         """
