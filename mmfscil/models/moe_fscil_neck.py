@@ -479,9 +479,7 @@ class MoEFSCILNeck(BaseModule):
             self.query_proj = nn.Linear(out_channels, out_channels)
             self.key_proj = nn.Linear(out_channels, out_channels)
             self.value_proj = nn.Linear(out_channels, out_channels)
-        
-        # Note: No shared SS2D block - each expert has its own SS2D for specialization
-        
+
         # SS2D MoE module (each expert has its own SS2D block)
         self.moe = MoEFSCIL(
             dim=out_channels,
