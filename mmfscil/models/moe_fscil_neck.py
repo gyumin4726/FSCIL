@@ -553,13 +553,14 @@ class MoEFSCILNeck(BaseModule):
                 - 'skip_features': Skip features for analysis (if multi-scale enabled)
         """
         
-        # Enhanced MoE: Extract multi-scale features from ResNet tuple output
+        # Enhanced MoE: Extract multi-scale features from ResNet tuple output (only when needed)
         if isinstance(x, tuple):
-            if multi_scale_features is None and len(x) > 1:
+            x = x[-1]  # layer4 as main input
+            # Only extract multi-scale features when multi-scale skip is enabled
+            if self.use_multi_scale_skip and multi_scale_features is None and len(x) > 1:
                 # ResNet with out_indices=(0,1,2,3) returns (layer1, layer2, layer3, layer4)
                 # Use layer1-3 as multi-scale features, layer4 as main input
                 multi_scale_features = x[:-1]  # [layer1, layer2, layer3]
-            x = x[-1]  # layer4 as main input
         
         # multi_scale_features가 없으면 오류 발생 (multi-scale 사용시에만)
         if self.use_multi_scale_skip and (multi_scale_features is None or len(multi_scale_features) == 0):
@@ -588,11 +589,11 @@ class MoEFSCILNeck(BaseModule):
         # Initialize final output with MoE result
         final_output = moe_output
         
-        # Collect skip connections for enhanced fusion
-        skip_features = [identity_proj]
+        # Collect skip connections for enhanced fusion (only when multi-scale is enabled)
+        skip_features = [identity_proj] if self.use_multi_scale_skip else None
         
         # Multi-scale skip connections (Enhanced MoE feature)
-        if self.use_multi_scale_skip:
+        if self.use_multi_scale_skip and skip_features is not None:
             if multi_scale_features is not None:
                 # Use actual multi-scale features when available
                 for i, feat in enumerate(multi_scale_features):
@@ -606,7 +607,7 @@ class MoEFSCILNeck(BaseModule):
                             self.logger.info(f"MultiScaleAdapter {i}: {feat.shape} → {adapted_feat.shape}")
 
         # Cross-attention based skip connection fusion (Enhanced MoE)
-        if self.use_multi_scale_skip and len(skip_features) > 1:
+        if self.use_multi_scale_skip and skip_features is not None and len(skip_features) > 1:
             # Stack all skip features: [B, num_features, feature_dim]
             skip_stack = torch.stack(skip_features, dim=1)  # [B, N, D]
             
@@ -676,7 +677,7 @@ class MoEFSCILNeck(BaseModule):
         })
         
         # Add skip features for analysis (when multi-scale is enabled)
-        if self.use_multi_scale_skip:
+        if self.use_multi_scale_skip and skip_features is not None:
             outputs['skip_features'] = skip_features
         
         return outputs
