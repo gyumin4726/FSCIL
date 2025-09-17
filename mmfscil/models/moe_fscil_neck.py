@@ -56,15 +56,11 @@ class MultiScaleAdapter(BaseModule):
         self.feat_size = feat_size
         self.num_layers = num_layers
         self.mid_channels = in_channels * 2 if mid_channels is None else mid_channels
-        
-        # 1. Spatial size unification
+        # 1. Spatial size unification (MoE와 동일한 크기로 맞춤)
         self.spatial_adapter = nn.AdaptiveAvgPool2d((feat_size, feat_size))
         
         # 2. Simple MLP projection
         self.mlp_proj = self._build_mlp(in_channels, out_channels, self.mid_channels, num_layers, feat_size)
-        
-        # 3. Final pooling
-        self.final_pool = nn.AdaptiveAvgPool2d((1, 1))
         
     def _build_mlp(self, in_channels, out_channels, mid_channels, num_layers, feat_size):
         """Build MLP projection layers."""
@@ -88,7 +84,7 @@ class MultiScaleAdapter(BaseModule):
             x (Tensor): Input feature tensor (B, in_channels, H, W)
             
         Returns:
-            Tensor: Output feature vector (B, out_channels)
+            Tensor: Output feature tensor (B, out_channels, H, W) - 공간 정보 유지
         """
         B, C, H, W = x.shape
         
@@ -98,11 +94,7 @@ class MultiScaleAdapter(BaseModule):
         # Step 2: MLP projection
         x = self.mlp_proj(x)         # (B, out_channels, feat_size, feat_size)
         
-        # Step 3: Final pooling
-        x = self.final_pool(x)       # (B, out_channels, 1, 1)
-        x = x.view(B, -1)            # (B, out_channels)
-        
-        return x
+        return x  # (B, out_channels, feat_size, feat_size) - 공간 정보 유지
 
 
 class FSCILGate(nn.Module):
@@ -166,12 +158,12 @@ class FSCILGate(nn.Module):
         aux_loss = None
         if self.use_aux_loss:
             # importance: 원본 softmax 확률의 평균 (soft routing 기준 기대 분포)
-            importance = raw_gate_scores.mean(0)     # [num_experts] - RAW softmax!
+            importance = raw_gate_scores.mean(0)     # [num_experts
             
             # load: 실제 top-1 dispatch 결과 (hard routing 분포)
-            load = mask.float().mean(0)              # [num_experts] - actual selection
+            load = mask.float().mean(0)              # [num_experts]
             
-            # load balancing loss: 진짜 "soft vs hard" 분포 비교!
+            # load balancing loss: 진짜 "soft vs hard" 분포 비교
             # raw_gate_scores vs actual selection으로 제대로 된 load balancing
             aux_loss = self.aux_loss_weight * ((load - importance) ** 2).mean()
         
@@ -590,31 +582,37 @@ class MoEFSCILNeck(BaseModule):
         final_output = moe_output
         
         # Collect skip connections for enhanced fusion (only when multi-scale is enabled)
-        skip_features = [identity_proj] if self.use_multi_scale_skip else None
+        skip_features_spatial = [identity] if self.use_multi_scale_skip else None  # 공간 정보 유지
         
         # Multi-scale skip connections (Enhanced MoE feature)
-        if self.use_multi_scale_skip and skip_features is not None:
+        if self.use_multi_scale_skip and skip_features_spatial is not None:
             if multi_scale_features is not None:
                 # Use actual multi-scale features when available
                 for i, feat in enumerate(multi_scale_features):
                     if i < len(self.multi_scale_adapters):
-                        # MLP-based adapter processing (no SS2D)
-                        adapted_feat = self.multi_scale_adapters[i](feat)  # (B, out_channels)
-                        skip_features.append(adapted_feat)
+                        # MLP-based adapter processing (공간 정보 유지)
+                        adapted_feat = self.multi_scale_adapters[i](feat)  # (B, out_channels, H, W)
+                        skip_features_spatial.append(adapted_feat)
                         
                         # Log adapter usage for debugging
                         if hasattr(self, 'logger') and torch.rand(1).item() < 0.01:  # 1% 확률로 로그
                             self.logger.info(f"MultiScaleAdapter {i}: {feat.shape} → {adapted_feat.shape}")
 
         # Cross-attention based skip connection fusion (Enhanced MoE)
-        if self.use_multi_scale_skip and skip_features is not None and len(skip_features) > 1:
-            # Stack all skip features: [B, num_features, feature_dim]
-            skip_stack = torch.stack(skip_features, dim=1)  # [B, N, D]
+        if self.use_multi_scale_skip and skip_features_spatial is not None and len(skip_features_spatial) > 1:
+            # 모든 skip features는 이미 동일한 공간 크기 (MultiScaleAdapter에서 맞춤)
+            B, C, H, W = skip_features_spatial[0].shape  # 기준 크기 (identity)
+            
+            # Stack all skip features: [B, num_features, channels, H, W]
+            skip_stack = torch.stack(skip_features_spatial, dim=1)  # [B, N, C, H, W]
+            
+            # 공간 차원을 유지하면서 가중치 계산을 위해 평균 풀링
+            skip_flat = skip_stack.mean(dim=(-2, -1))  # [B, N, C] - 공간 정보 압축
             
             # Prepare Query (from MoE output), Key, Value (from skip features)
-            query = self.query_proj(moe_output).unsqueeze(1)  # [B, 1, D]
-            keys = self.key_proj(skip_stack)         # [B, N, D]
-            values = self.value_proj(skip_stack)     # [B, N, D]
+            query = self.query_proj(moe_output).unsqueeze(1)  # [B, 1, C]
+            keys = self.key_proj(skip_flat)         # [B, N, C]
+            values = self.value_proj(skip_flat)     # [B, N, C]
             
             # Multi-head cross-attention
             attended_features, attention_weights = self.cross_attention(query, keys, values)
@@ -623,33 +621,16 @@ class MoEFSCILNeck(BaseModule):
             # softmax 정규화 (안정성 보강)
             weights = torch.softmax(attention_weights.squeeze(1), dim=-1)  # [B, N]
             
-            # Skip features에 가중치 적용
-            skip_stack = torch.stack(skip_features, dim=1)  # [B, N, D]
-            weighted_skip = (weights.unsqueeze(-1) * skip_stack).sum(dim=1)  # [B, D]
+            # Skip features에 가중치 적용 (공간 정보 유지)
+            weighted_skip = (weights.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1) * skip_stack).sum(dim=1)  # [B, C, H, W]
             
-            # NEW: Apply shared SS2D to weighted skip features
-            # Reshape for SS2D processing: [B, D] -> [B, H, W, D]
-            B_skip, D_skip = weighted_skip.shape
-            H_skip = W_skip = int((D_skip // self.out_channels) ** 0.5)
-            if H_skip * W_skip * self.out_channels != D_skip:
-                # If not perfect square, use feat_size
-                H_skip = W_skip = self.feat_size
-                # Pad or truncate to fit
-                if D_skip > H_skip * W_skip * self.out_channels:
-                    weighted_skip = weighted_skip[:, :H_skip * W_skip * self.out_channels]
-                else:
-                    padding = H_skip * W_skip * self.out_channels - D_skip
-                    weighted_skip = F.pad(weighted_skip, (0, padding))
-            
-            # Reshape to spatial format for SS2D
-            weighted_skip_spatial = weighted_skip.view(B_skip, H_skip, W_skip, self.out_channels)
-            
-            # Apply shared SS2D to weighted skip features
-            skip_ss2d_output, _ = self.skip_ss2d(weighted_skip_spatial)  # [B, H, W, D]
+            # Apply shared SS2D to weighted skip features (공간 정보 활용)
+            weighted_skip_spatial = weighted_skip.permute(0, 2, 3, 1)  # [B, H, W, C]
+            skip_ss2d_output, _ = self.skip_ss2d(weighted_skip_spatial)  # [B, H, W, C]
             
             # Convert back to vector format
-            skip_ss2d_output = skip_ss2d_output.permute(0, 3, 1, 2)  # [B, D, H, W]
-            skip_ss2d_output = F.adaptive_avg_pool2d(skip_ss2d_output, (1, 1)).view(B_skip, -1)  # [B, D]
+            skip_ss2d_output = skip_ss2d_output.permute(0, 3, 1, 2)  # [B, C, H, W]
+            skip_ss2d_output = F.adaptive_avg_pool2d(skip_ss2d_output, (1, 1)).view(B, -1)  # [B, C]
             
             # 최종 출력: MoE + SS2D-processed skip connections
             final_output = moe_output + 0.1 * skip_ss2d_output
@@ -661,12 +642,12 @@ class MoEFSCILNeck(BaseModule):
                 feature_names = ['layer4(identity)']
                 if self.use_multi_scale_skip:
                     feature_names.extend([f'layer{i+1}' for i in range(len(self.multi_scale_channels))])
-                feature_names = feature_names[:len(skip_features)]
+                feature_names = feature_names[:len(skip_features_spatial)]
                 weight_info = ', '.join([f"{name}: {val:.3f}" for name, val in zip(feature_names, weight_values)])
                 self.logger.info(f"Cross-attention weights: {weight_info}")
         else:
             # Simple residual connection (when multi-scale is not used)
-            final_output = moe_output + identity_proj
+            final_output = moe_output
         
         # Prepare outputs
         outputs.update({
@@ -677,7 +658,7 @@ class MoEFSCILNeck(BaseModule):
         })
         
         # Add skip features for analysis (when multi-scale is enabled)
-        if self.use_multi_scale_skip and skip_features is not None:
-            outputs['skip_features'] = skip_features
+        if self.use_multi_scale_skip and skip_features_spatial is not None:
+            outputs['skip_features'] = skip_features_spatial
         
         return outputs
