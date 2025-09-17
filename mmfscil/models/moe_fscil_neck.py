@@ -158,7 +158,7 @@ class FSCILGate(nn.Module):
         aux_loss = None
         if self.use_aux_loss:
             # importance: 원본 softmax 확률의 평균 (soft routing 기준 기대 분포)
-            importance = raw_gate_scores.mean(0)     # [num_experts
+            importance = raw_gate_scores.mean(0)     # [num_experts]
             
             # load: 실제 top-1 dispatch 결과 (hard routing 분포)
             load = mask.float().mean(0)              # [num_experts]
@@ -562,9 +562,6 @@ class MoEFSCILNeck(BaseModule):
         identity = x
         outputs = {}
         
-        # Prepare residual connection
-        identity_proj = self.avg(identity).view(B, -1)
-        
         # MLP projection (following original MambaNeck pattern)
         x_proj = self.mlp_proj(identity)  # [B, out_channels, H, W]
         x_proj = x_proj.permute(0, 2, 3, 1).view(B, H * W, -1)  # [B, H*W, out_channels]
@@ -639,21 +636,20 @@ class MoEFSCILNeck(BaseModule):
             if hasattr(self, 'logger') and torch.rand(1).item() < 0.01:  # 1% 확률로 로그
                 weight_values = weights[0].detach().cpu().numpy()
                 # Generate dynamic feature names based on actual skip features (same as MambaNeck)
-                feature_names = ['layer4(identity)']
+                feature_names = ['layer4']
                 if self.use_multi_scale_skip:
                     feature_names.extend([f'layer{i+1}' for i in range(len(self.multi_scale_channels))])
                 feature_names = feature_names[:len(skip_features_spatial)]
                 weight_info = ', '.join([f"{name}: {val:.3f}" for name, val in zip(feature_names, weight_values)])
                 self.logger.info(f"Cross-attention weights: {weight_info}")
         else:
-            # Simple residual connection (when multi-scale is not used)
+            # Simple output without residual connection
             final_output = moe_output
         
         # Prepare outputs
         outputs.update({
             'out': final_output,
             'aux_loss': aux_loss,
-            'residual': identity_proj,
             'main': moe_output,  # For compatibility with existing code
         })
         

@@ -292,8 +292,9 @@ class ImageClassifierCIL(BaseClassifier):
         # Base and novel feature norms
         for key, value in [('input', x), ('main', x_main),
                            ('residual', x_residual)]:
-            losses[f'norm_{key}_base'] = torch.norm(value[indices_base])
-            losses[f'norm_{key}_novel'] = torch.norm(value[indices_novel])
+            if value is not None:
+                losses[f'norm_{key}_base'] = torch.norm(value[indices_base])
+                losses[f'norm_{key}_novel'] = torch.norm(value[indices_novel])
 
         # Input-dependent parameters norms
         for key, value in [('dts', dts), ('Bs', Bs), ('Cs', Cs),
