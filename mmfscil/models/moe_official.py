@@ -2056,4 +2056,4 @@ class HParams(object):
       setattr(self, k, v)
 
   def add_hparam(self, k, v):
-    setattr(self, k, v)
+    setattr(self, k, v) 
