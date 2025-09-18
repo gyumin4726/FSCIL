@@ -166,6 +166,10 @@ class FSCILGate(nn.Module):
             # load balancing loss: 진짜 "soft vs hard" 분포 비교
             # raw_gate_scores vs actual selection으로 제대로 된 load balancing
             aux_loss = self.aux_loss_weight * ((load - importance) ** 2).mean()
+            
+            # Official Switch Transformer load balancing loss: importance * load (상관관계 최대화)
+            # 공식: mean(importance * load) * num_experts²
+            #aux_loss = self.aux_loss_weight * (importance * load).mean() * (self.num_experts ** 2)
         
         return gate_scores, aux_loss
     
