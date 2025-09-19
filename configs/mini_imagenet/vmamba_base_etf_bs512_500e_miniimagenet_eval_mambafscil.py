@@ -22,6 +22,7 @@ model = dict(backbone=dict(type='VMambaBackbone',
                        d_state=256,  # SS2D hidden state dimension
                        dt_rank=256,  # SS2D delta rank
                        ssm_expand_ratio=1.0,  # SS2D expansion ratio
+                       use_aux_loss=True,
                        aux_loss_weight=0.01,  # Load balancing loss weight
                        # FSCIL loss parameters (for compatibility)
                        loss_weight_supp=100,

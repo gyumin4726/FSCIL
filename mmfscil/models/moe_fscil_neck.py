@@ -175,6 +175,7 @@ class MoEFSCIL(nn.Module):
                  d_state=256,
                  dt_rank=256,
                  ssm_expand_ratio=1.0,
+                 use_aux_loss=True,
                  aux_loss_weight=0.01):
         super().__init__()
         self.dim = dim
@@ -186,6 +187,7 @@ class MoEFSCIL(nn.Module):
             num_experts=num_experts,
             top_k=top_k,
             capacity_factor=capacity_factor,
+            use_aux_loss=use_aux_loss,
             aux_loss_weight=aux_loss_weight
         )
         
@@ -280,6 +282,7 @@ class MoEFSCILNeck(BaseModule):
                  param_avg_dim='0-1-3',
                  use_multi_scale_skip=False,
                  multi_scale_channels=[128, 256, 512],
+                 use_aux_loss=True,
                  aux_loss_weight=0.01):
         super(MoEFSCILNeck, self).__init__(init_cfg=None)
         
@@ -293,6 +296,7 @@ class MoEFSCILNeck(BaseModule):
 
         self.use_multi_scale_skip = use_multi_scale_skip
         self.multi_scale_channels = multi_scale_channels
+        self.use_aux_loss = use_aux_loss
 
         self.loss_weight_supp = loss_weight_supp
         self.loss_weight_supp_novel = loss_weight_supp_novel
@@ -368,6 +372,7 @@ class MoEFSCILNeck(BaseModule):
             d_state=d_state,
             dt_rank=dt_rank if dt_rank is not None else d_state,
             ssm_expand_ratio=ssm_expand_ratio,
+            use_aux_loss=use_aux_loss,
             aux_loss_weight=aux_loss_weight
         )
 
