@@ -165,11 +165,11 @@ class FSCILGate(nn.Module):
             
             # load balancing loss: 진짜 "soft vs hard" 분포 비교
             # raw_gate_scores vs actual selection으로 제대로 된 load balancing
-            aux_loss = self.aux_loss_weight * ((load - importance) ** 2).mean()
+            #aux_loss = self.aux_loss_weight * ((load - importance) ** 2).mean()
             
             # Official Switch Transformer load balancing loss: importance * load (상관관계 최대화)
             # 공식: mean(importance * load) * num_experts²
-            #aux_loss = self.aux_loss_weight * (importance * load).mean() * (self.num_experts ** 2)
+            aux_loss = self.aux_loss_weight * (importance * load).mean() * (self.num_experts ** 2)
         
         return gate_scores, aux_loss
     
@@ -311,33 +311,36 @@ class MoEFSCIL(nn.Module):
         # Find top-k experts for each token (efficient sparse routing)
         top_k_scores, top_k_indices = gate_scores.topk(self.top_k, dim=-1)  # [B, top_k]
         
-        # Debug: Expert activation statistics (5% 확률로 출력)
-        if hasattr(self, 'debug_enabled') and self.debug_enabled and torch.rand(1).item() < 0.5:
-            # 전체 배치에서 각 expert 활성화 횟수 계산
-            expert_counts = torch.bincount(top_k_indices.flatten(), minlength=self.num_experts)
-            total_activations = expert_counts.sum().item()
+        # Debug: Expert activation statistics (10번째 forward마다 출력)
+        if hasattr(self, 'debug_enabled') and self.debug_enabled:
+            # Forward pass counter 증가
+            if not hasattr(self, 'forward_count'):
+                self.forward_count = 0
+            self.forward_count += 1
             
-            # 활성화된 experts 정보 생성
-            activated_experts = []
-            for expert_id in range(self.num_experts):
-                count = expert_counts[expert_id].item()
-                if count > 0:
-                    activated_experts.append(f"E{expert_id}")
-            
-            activated_str = " ".join(activated_experts) if activated_experts else "None"
-            print(f"🎯 MoE Expert Activation: {len(activated_experts)}/{self.num_experts} active - {activated_str}")
-            
-            # 각 expert별 활성화 비율 출력 (상세 정보)
-            expert_ratios = []
-            for expert_id in range(self.num_experts):
-                count = expert_counts[expert_id].item()
-                ratio = count / total_activations if total_activations > 0 else 0.0
-                if count > 0:
-                    expert_ratios.append(f"E{expert_id}:{ratio:.2f}")
-            
-            if expert_ratios:
-                ratio_str = " ".join(expert_ratios)
-                print(f"📊 Expert Usage Ratios: {ratio_str}")
+            # 10번째 forward마다 출력
+            if self.forward_count % 10 == 0:
+                # 전체 배치에서 각 expert 활성화 횟수 계산
+                expert_counts = torch.bincount(top_k_indices.flatten(), minlength=self.num_experts)
+                total_activations = expert_counts.sum().item()
+                
+                # 모든 experts 상태를 표시 (활성화되지 않은 것은 -)
+                expert_status = []
+                active_count = 0
+                for expert_id in range(self.num_experts):
+                    count = expert_counts[expert_id].item()
+                    if count > 0:
+                        ratio = count / total_activations if total_activations > 0 else 0.0
+                        expert_status.append(f"{ratio*100:4.1f}%")
+                        active_count += 1
+                    else:
+                        expert_status.append("  - ")
+                
+                # 가독성 좋은 형태로 출력
+                status_str = " | ".join([f"E{i}:{status}" for i, status in enumerate(expert_status)])
+                print("=" * 100)
+                print(f"Forward #{self.forward_count:4d} | Active: {active_count}/{self.num_experts} | {status_str}")
+                print("=" * 100)
         
         # Initialize output
         mixed_output = torch.zeros(B, dim, device=x.device, dtype=x.dtype)
@@ -518,6 +521,7 @@ class MoEFSCILNeck(BaseModule):
         
         # Enable debug mode for expert activation monitoring
         self.moe.debug_enabled = True
+        self.moe.forward_count = 0  # Forward pass counter for debug
         
         
         self.init_weights()
