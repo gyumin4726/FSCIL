@@ -52,7 +52,7 @@ optimizer = dict(type='SGD',
                  weight_decay=0.0005,
                  paramwise_cfg=dict(
                      custom_keys={
-                         'neck.mlp_proj': dict(lr_mult=1.2),
+                         'neck.mlp_proj': dict(lr_mult=10.0),
                          'neck.pos_embed': dict(lr_mult=10.0),
                          'neck.moe.gate': dict(lr_mult=10.0),     
                          'neck.moe.experts': dict(lr_mult=10.0),  
