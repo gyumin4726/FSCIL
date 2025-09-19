@@ -15,22 +15,17 @@ model = dict(backbone=dict(type='VMambaBackbone',
                            out_indices=(0, 1, 2, 3),  # Multi-scale features from all stages
                            frozen_stages=0,  # Freeze patch embedding and first stage
                            channel_first=True),
-             neck=dict(type='MambaNeck',
-                       in_channels=1024,  # VMamba base stage4 channels
+             neck=dict(type='MoEFSCILNeck',
+                       num_experts=4, 
+                       top_k=1,  
+                       in_channels=1024,
                        out_channels=1024,
-                       feat_size=1,  # 실제 출력 크기에 맞게 수정 (5×5)
+                       feat_size=1,
                        num_layers=3,
-                       use_new_branch=True,
-                       detach_residual=False,
-                       num_layers_new=3,
-                       loss_weight_supp=100,
-                       loss_weight_supp_novel=10,
-                       loss_weight_sep=0.001,
-                       loss_weight_sep_new=0.001,
-                       param_avg_dim='0-1-3',
-                       # Enhanced skip connection settings (MASC-M)
-                       use_multi_scale_skip=False,
-                       multi_scale_channels=[128, 256, 512]),
+                       d_state=256,
+                       dt_rank=256,
+                       ssm_expand_ratio=1.0,
+                       aux_loss_weight=0.01),
              head=dict(type='ETFHead',
                        in_channels=1024,
                        num_classes=100,
@@ -52,28 +47,10 @@ optimizer = dict(type='SGD',
                  weight_decay=0.0005,
                  paramwise_cfg=dict(
                      custom_keys={
-                         'neck.mlp_proj.': dict(lr_mult=0.2),
-                         'neck.block.': dict(lr_mult=0.2),
-                         'neck.residual_proj': dict(lr_mult=0.2),
-                         'neck.pos_embed': dict(lr_mult=0.2),
-                         'neck.pos_embed_new': dict(lr_mult=1),
-                         # Enhanced skip connection components
-                         'neck.multi_scale_adapters': dict(lr_mult=0.5),
-                         'neck.skip_attention': dict(lr_mult=1.0),
-                         'neck.skip_proj': dict(lr_mult=1.0),
+                         'neck.mlp_proj': dict(lr_mult=10.0),
+                         'neck.pos_embed': dict(lr_mult=10.0),
+                         'neck.moe.gate': dict(lr_mult=10.0),     
+                         'neck.moe.experts': dict(lr_mult=10.0),  
                      }))
-
-lr_config = dict(
-    policy='CosineAnnealingCooldown',
-    min_lr=None,
-    min_lr_ratio=0.1,
-    cool_down_ratio=0.1,
-    cool_down_time=10,
-    by_epoch=False,
-    # warmup
-    warmup='linear',
-    warmup_iters=100,
-    warmup_ratio=0.1,
-    warmup_by_epoch=False)
 
 find_unused_parameters=True

@@ -14,14 +14,19 @@ model = dict(backbone=dict(type='VMambaBackbone',
                            out_indices=(0, 1, 2, 3),  # Extract features from all 4 stages
                            frozen_stages=0,  # Freeze patch embedding and first stage
                            channel_first=True),
-             neck=dict(type='MambaNeck',
-                       in_channels=1024,  # VMamba base stage4 output channels
+             neck=dict(type='MoEFSCILNeck',
+                       num_experts=4, 
+                       top_k=1,  
+                       in_channels=1024,
                        out_channels=1024,
-                       feat_size=1,  # 실제 출력 크기에 맞게 수정 (5×5)
+                       feat_size=1,
                        num_layers=3,
-                       # Enhanced skip connection settings (MASC-M) for VMamba features
                        use_multi_scale_skip=True,
-                       multi_scale_channels=[128, 256, 512]),
+                       multi_scale_channels=[128, 256, 512],
+                       d_state=256,
+                       dt_rank=256,
+                       ssm_expand_ratio=1.0,
+                       aux_loss_weight=0.01),
              head=dict(type='ETFHead',
                        in_channels=1024,
                        num_classes=100,
@@ -31,3 +36,33 @@ model = dict(backbone=dict(type='VMambaBackbone',
                        loss=dict(type='CombinedLoss', dr_weight=0.0, ce_weight=1.0)),
              mixup=0,
              mixup_prob=0)
+
+optimizer = dict(
+    type='SGD',
+    lr=0.25,
+    momentum=0.9,
+    weight_decay=0.0005,
+    paramwise_cfg=dict(
+        custom_keys={
+            'backbone': dict(lr_mult=0.1),
+            'neck.moe.gate': dict(lr_mult=1.5),     
+            'neck.moe.experts': dict(lr_mult=1.2),  
+        }
+    ))
+
+optimizer = dict(
+    type='SGD',
+    lr=0.25,
+    momentum=0.9,
+    weight_decay=0.0005,
+    paramwise_cfg=dict(
+        custom_keys={
+            'backbone': dict(lr_mult=0.1),
+            'neck.mlp_proj': dict(lr_mult=1.2),
+            'neck.pos_embed': dict(lr_mult=10.0),
+            'neck.moe.gate': dict(lr_mult=10.0),     
+            'neck.moe.experts': dict(lr_mult=10.0),
+        }
+    ))
+
+find_unused_parameters=True
