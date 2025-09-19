@@ -8,4 +8,4 @@ lr_config = dict(policy='step',
                  warmup_iters=3000,
                  warmup_ratio=0.25,
                  step=[20, 30, 35, 40, 45])
-runner = dict(type='EpochBasedRunner', max_epochs=50)
+runner = dict(type='EpochBasedRunner', max_epochs=5)
