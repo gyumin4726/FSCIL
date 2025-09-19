@@ -1,16 +1,3 @@
-"""
-MoE-FSCIL Neck: Mixture of Experts for Few-Shot Class-Incremental Learning
-
-This module replaces the traditional branch structure with a more efficient and scalable
-Mixture of Experts (MoE) architecture for FSCIL tasks.
-
-Key innovations:
-1. Branch structure elimination → Single MoE architecture
-2. Dynamic expert allocation based on input characteristics
-3. Constant computational cost regardless of expert count
-4. FSCIL-specific gating mechanisms
-"""
-
 from collections import OrderedDict
 import torch
 import torch.nn as nn
@@ -29,20 +16,6 @@ from .ss2d import SS2D
 
 
 class MultiScaleAdapter(BaseModule):
-    """Simple MLP-based Multi-Scale Feature Adapter for MoE-FSCIL.
-    
-    This adapter processes multi-scale features from different backbone layers
-    using only MLP projections (no SS2D). SS2D processing will be applied
-    after weighted combination of all features.
-    
-    Args:
-        in_channels (int): Number of input channels from backbone layer.
-        out_channels (int): Number of output channels (typically 512).
-        feat_size (int): Spatial size after adaptive pooling.
-        num_layers (int): Number of layers in the MLP projections.
-        mid_channels (int, optional): Number of intermediate channels in MLP projections.
-    """
-    
     def __init__(self,
                  in_channels,
                  out_channels=512,
@@ -56,10 +29,10 @@ class MultiScaleAdapter(BaseModule):
         self.feat_size = feat_size
         self.num_layers = num_layers
         self.mid_channels = in_channels * 2 if mid_channels is None else mid_channels
-        # 1. Spatial size unification (MoE와 동일한 크기로 맞춤)
+        # 1. MoE와 동일한 크기로 맞춤
         self.spatial_adapter = nn.AdaptiveAvgPool2d((feat_size, feat_size))
         
-        # 2. Simple MLP projection
+        # 2. 간단한 MLP 프로젝션
         self.mlp_proj = self._build_mlp(in_channels, out_channels, self.mid_channels, num_layers, feat_size)
         
     def _build_mlp(self, in_channels, out_channels, mid_channels, num_layers, feat_size):
@@ -78,35 +51,18 @@ class MultiScaleAdapter(BaseModule):
         return nn.Sequential(*layers)
         
     def forward(self, x):
-        """Forward pass of Multi-Scale MLP Adapter.
-        
-        Args:
-            x (Tensor): Input feature tensor (B, in_channels, H, W)
-            
-        Returns:
-            Tensor: Output feature tensor (B, out_channels, H, W) - 공간 정보 유지
-        """
         B, C, H, W = x.shape
         
-        # Step 1: Spatial size unification
+        # Step 1: 공간 크기 통일
         x = self.spatial_adapter(x)  # (B, C, feat_size, feat_size)
         
-        # Step 2: MLP projection
+        # Step 2: MLP 프로젝션
         x = self.mlp_proj(x)         # (B, out_channels, feat_size, feat_size)
         
         return x  # (B, out_channels, feat_size, feat_size) - 공간 정보 유지
 
 
 class FSCILGate(nn.Module):
-    """
-    FSCIL-adapted SwitchGate based on official MoE-Mamba implementation.
-    
-    Follows the official SwitchGate pattern but adds FSCIL-specific features:
-    - Session-aware routing (base vs incremental)
-    - Load balancing for stable training
-    - Capacity control for expert utilization
-    """
-    
     def __init__(self,
                  dim,
                  num_experts: int,
@@ -124,21 +80,12 @@ class FSCILGate(nn.Module):
         self.use_aux_loss = use_aux_loss
         self.aux_loss_weight = aux_loss_weight
         
-        # Simple gating network (following official implementation)
+        # Gating network
         self.w_gate = nn.Linear(dim, num_experts)
 
         
     def forward(self, x: torch.Tensor):
-        """
-        Forward pass following official SwitchGate pattern with FSCIL adaptations.
-        
-        Args:
-            x: Input features [B, dim] (flattened for gating)
-            
-        Returns:
-            gate_scores: Expert selection probabilities [B, num_experts]
-            aux_loss: Load balancing auxiliary loss (if enabled)
-        """
+
         # Compute raw gate scores directly (no session context for stability)
         raw_gate_scores = F.softmax(self.w_gate(x), dim=-1)  # [B, num_experts]
         
@@ -150,9 +97,9 @@ class FSCILGate(nn.Module):
         mask = torch.zeros_like(raw_gate_scores).scatter_(1, top_k_indices, 1)
         masked_gate_scores = raw_gate_scores * mask
         
-        # Normalize gate scores for dispatch (official pattern)
+        # Normalize gate scores for dispatch
         denominators = masked_gate_scores.sum(0, keepdim=True) + self.epsilon
-        gate_scores = (masked_gate_scores / denominators) * capacity  # For dispatch only!
+        gate_scores = (masked_gate_scores / denominators) * capacity 
         
         # Compute auxiliary loss for load balancing (CORRECT Switch Transformer approach)
         aux_loss = None
@@ -177,15 +124,6 @@ class FSCILGate(nn.Module):
 
 
 class SS2DExpert(nn.Module):
-    """
-    FSCIL Expert - Pure FeedForward network (following official MoE-Mamba pattern).
-    
-    Key design decisions:
-    1. SS2D processing is shared (before MoE) - following original MambaNeck pattern
-    2. Each expert specializes in post-SS2D feature transformation
-    3. Simple FFN structure like official MoE-Mamba implementation
-    """
-    
     def __init__(self,
                  dim,
                  expert_id=0,
@@ -198,7 +136,6 @@ class SS2DExpert(nn.Module):
         self.d_state = d_state
         self.dt_rank = dt_rank
         
-        # Expert-specific SS2D block
         directions = ('h', 'h_flip', 'v', 'v_flip')
         self.ss2d_block = SS2D(
             dim,
@@ -209,49 +146,26 @@ class SS2DExpert(nn.Module):
             use_out_proj=False,
             use_out_norm=True
         )
-        
-        # Expert-specific normalization
+
         self.norm = nn.LayerNorm(dim)
         
-        # Global average pooling for spatial aggregation
         self.avg_pool = nn.AdaptiveAvgPool2d((1, 1))
         
     def forward(self, x):
-        """
-        SS2D Expert forward pass - specialized sequence modeling.
-        
-        Args:
-            x: Input features [B, H, W, dim] (spatial features before SS2D)
-            
-        Returns:
-            output: Expert-processed features [B, dim] (flattened)
-        """
         B, H, W, dim = x.shape
-        
-        # Expert-specific SS2D processing
+
         x_expert, _ = self.ss2d_block(x)  # [B, H, W, dim]
-        
-        # Spatial aggregation and flattening
+
         x_expert = x_expert.permute(0, 3, 1, 2)  # [B, dim, H, W]
         x_expert = self.avg_pool(x_expert).view(B, -1)  # [B, dim]
-        
-        # Normalize output
+
         output = self.norm(x_expert)
         
         return output
 
 
 class MoEFSCIL(nn.Module):
-    """
-    Mixture of Experts module specifically designed for FSCIL tasks.
-    
-    Key features:
-    - Multiple experts specializing in different aspects of FSCIL
-    - FSCIL-specific gating mechanism
-    - Load balancing for stable training
-    - Efficient sparse activation
-    """
-    
+
     def __init__(self,
                  dim,
                  num_experts=4,
@@ -266,8 +180,7 @@ class MoEFSCIL(nn.Module):
         self.dim = dim
         self.num_experts = num_experts
         self.top_k = top_k
-        
-        # FSCIL-specific gating mechanism
+
         self.gate = FSCILGate(
             dim=dim,
             num_experts=num_experts,
@@ -276,8 +189,6 @@ class MoEFSCIL(nn.Module):
             aux_loss_weight=aux_loss_weight
         )
         
-        # Create expert modules (pure FFN, following official MoE-Mamba)
-        # SS2D experts (each with own SS2D block)
         self.experts = nn.ModuleList([
             SS2DExpert(
                 dim=dim,
@@ -290,16 +201,7 @@ class MoEFSCIL(nn.Module):
         ])
         
     def forward(self, x):
-        """
-        SS2D MoE forward pass with FSCIL-specific routing.
-        
-        Args:
-            x: Input features [B, H, W, dim] (spatial features for SS2D experts)
-            
-        Returns:
-            output: Mixed expert outputs [B, dim]
-            aux_loss: Load balancing loss
-        """
+
         B, H, W, dim = x.shape
         
         # Flatten for gating decision (gate needs [B, dim] input)
@@ -311,7 +213,7 @@ class MoEFSCIL(nn.Module):
         # Find top-k experts for each token (efficient sparse routing)
         top_k_scores, top_k_indices = gate_scores.topk(self.top_k, dim=-1)  # [B, top_k]
         
-        # Debug: Expert activation statistics (10번째 forward마다 출력)
+        # Debug: 10번째 forward마다 출력)
         if hasattr(self, 'debug_enabled') and self.debug_enabled:
             # Forward pass counter 증가
             if not hasattr(self, 'forward_count'):
@@ -335,8 +237,7 @@ class MoEFSCIL(nn.Module):
                         active_count += 1
                     else:
                         expert_status.append("  - ")
-                
-                # 가독성 좋은 형태로 출력
+
                 status_str = " | ".join([f"E{i}:{status}" for i, status in enumerate(expert_status)])
                 print("=" * 100)
                 print(f"Forward #{self.forward_count:4d} | Active: {active_count}/{self.num_experts} | {status_str}")
@@ -360,36 +261,7 @@ class MoEFSCIL(nn.Module):
 
 @NECKS.register_module()
 class MoEFSCILNeck(BaseModule):
-    """
-    MoE-FSCIL Neck: Revolutionary replacement for branch-based FSCIL architectures.
-    
-    This neck completely eliminates the traditional branch structure and replaces it
-    with a scalable Mixture of Experts approach. Key advantages:
-    
-    1. Constant computational cost regardless of expert count
-    2. Dynamic expert specialization for different classes/sessions
-    3. Better scalability for long-term incremental learning
-    4. Maintains all benefits of dynamic parameter allocation
-    
-    Args:
-        in_channels (int): Number of input channels from backbone
-        out_channels (int): Number of output channels
-        num_experts (int): Number of expert modules (replaces branch count)
-        top_k (int): Number of experts to activate per input
-        d_state (int): Dimension of hidden state in SSM
-        dt_rank (int): Dimension rank in SSM
-        ssm_expand_ratio (float): Expansion ratio for SSM blocks
-        feat_size (int): Spatial size of input features
-        mid_channels (int): Intermediate channels in MLP projection
-        num_layers (int): Number of MLP layers
-        use_multi_scale_skip (bool): Whether to use multi-scale skip connections
-        multi_scale_channels (list): Channel dimensions for multi-scale features
-        # MoE auxiliary loss parameters
-        aux_loss_weight (float): Weight for auxiliary loss in load balancing (default: 0.01)
-        
-        # Note: Traditional FSCIL regularization losses are replaced by MoE load balancing
-    """
-    
+
     def __init__(self,
                  in_channels=512,
                  out_channels=512,
@@ -401,22 +273,16 @@ class MoEFSCILNeck(BaseModule):
                  feat_size=2,
                  mid_channels=None,
                  num_layers=2,
-                 # FSCIL suppression loss parameters
                  loss_weight_supp=0.0,
                  loss_weight_supp_novel=0.0,
-                 # FSCIL separation loss parameters
                  loss_weight_sep=0.0,
                  loss_weight_sep_new=0.0,
-                 # Parameter averaging for separation loss
                  param_avg_dim='0-1-3',
-                 # Multi-scale skip connection parameters
                  use_multi_scale_skip=False,
                  multi_scale_channels=[128, 256, 512],
-                 # MoE auxiliary loss parameters
                  aux_loss_weight=0.01):
         super(MoEFSCILNeck, self).__init__(init_cfg=None)
         
-        # Core parameters
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.num_experts = num_experts
@@ -424,23 +290,18 @@ class MoEFSCILNeck(BaseModule):
         self.feat_size = feat_size
         self.mid_channels = in_channels * 2 if mid_channels is None else mid_channels
         self.num_layers = num_layers
-        
-        # Multi-scale skip connection parameters
+
         self.use_multi_scale_skip = use_multi_scale_skip
         self.multi_scale_channels = multi_scale_channels
-        
-        # FSCIL suppression loss parameters
+
         self.loss_weight_supp = loss_weight_supp
         self.loss_weight_supp_novel = loss_weight_supp_novel
-        
-        # FSCIL separation loss parameters
+
         self.loss_weight_sep = loss_weight_sep
         self.loss_weight_sep_new = loss_weight_sep_new
         
-        # Parameter averaging dimensions for separation loss
         self.param_avg_dim = [int(item) for item in param_avg_dim.split('-')]
         
-        # Logger
         self.logger = get_root_logger()
         self.logger.info(f"MoE-FSCIL Neck initialized: {num_experts} experts, top-{top_k} activation")
         
@@ -449,35 +310,30 @@ class MoEFSCILNeck(BaseModule):
             self.logger.info(f"Multi-Scale Adapters: {self.multi_scale_channels} → {out_channels} channels")
             self.logger.info(f"Shared SS2D for skip connection processing after weighted combination")
         
-        # Global average pooling
         self.avg = nn.AdaptiveAvgPool2d((1, 1))
-        
-        # MLP projection (shared preprocessing - following original pattern)
+
         self.mlp_proj = self._build_mlp(
             in_channels, out_channels, self.mid_channels, num_layers, feat_size
         )
-        
-        # Shared positional embeddings (like original MambaNeck)
+
         self.pos_embed = nn.Parameter(
             torch.zeros(1, feat_size * feat_size, out_channels)
         )
         trunc_normal_(self.pos_embed, std=.02)
-        
-        # Multi-scale skip connection adapters (MLP only, no SS2D)
+
         if self.use_multi_scale_skip:
             self.multi_scale_adapters = nn.ModuleList()
             for ch in self.multi_scale_channels:
-                # Simple MLP-based Multi-Scale Adapter (no SS2D)
+
                 adapter = MultiScaleAdapter(
                     in_channels=ch,
                     out_channels=out_channels,
                     feat_size=self.feat_size,
-                    num_layers=self.num_layers,  # Use same num_layers as main MoEFSCILNeck
-                    mid_channels=ch * 2  # Adaptive mid_channels based on input channels
+                    num_layers=self.num_layers,
+                    mid_channels=ch * 2 
                 )
                 self.multi_scale_adapters.append(adapter)
             
-            # Shared SS2D block for skip connection processing
             directions = ('h', 'h_flip', 'v', 'v_flip')
             self.skip_ss2d = SS2D(
                 out_channels,
@@ -488,13 +344,11 @@ class MoEFSCILNeck(BaseModule):
                 use_out_proj=False,
                 use_out_norm=True
             )
-        
-        # Cross-attention based skip connection weighting (when multi-scale is enabled)
+
         if self.use_multi_scale_skip:
             num_skip_sources = 1  # identity
-            num_skip_sources += len(self.multi_scale_channels)  # multi-scale features
+            num_skip_sources += len(self.multi_scale_channels)
             
-            # Cross-attention 방식 (모든 skip features를 고려한 상호 attention)
             self.cross_attention = nn.MultiheadAttention(
                 embed_dim=out_channels,
                 num_heads=8,
@@ -502,12 +356,10 @@ class MoEFSCILNeck(BaseModule):
                 batch_first=True
             )
             
-            # Query, Key, Value projection layers
             self.query_proj = nn.Linear(out_channels, out_channels)
             self.key_proj = nn.Linear(out_channels, out_channels)
             self.value_proj = nn.Linear(out_channels, out_channels)
 
-        # SS2D MoE module (each expert has its own SS2D block)
         self.moe = MoEFSCIL(
             dim=out_channels,
             num_experts=num_experts,
@@ -518,10 +370,9 @@ class MoEFSCILNeck(BaseModule):
             ssm_expand_ratio=ssm_expand_ratio,
             aux_loss_weight=aux_loss_weight
         )
-        
-        # Enable debug mode for expert activation monitoring
+
         self.moe.debug_enabled = True
-        self.moe.forward_count = 0  # Forward pass counter for debug
+        self.moe.forward_count = 0 
         
         
         self.init_weights()
@@ -547,19 +398,16 @@ class MoEFSCILNeck(BaseModule):
         """Initialize weights with proper scaling for MoE and multi-scale adapters."""
         self.logger.info("🔧 Initializing MoE-FSCIL Neck weights...")
         
-        # Initialize multi-scale MLP adapters
         if self.use_multi_scale_skip:
             for i, adapter in enumerate(self.multi_scale_adapters):
-                # Initialize MLP projection layers
+
                 if hasattr(adapter, 'mlp_proj'):
-                    # Initialize first Conv2d layer in MLP
-                    first_layer = adapter.mlp_proj[0]  # First Conv2d layer
+                    first_layer = adapter.mlp_proj[0]  
                     if isinstance(first_layer, nn.Conv2d):
                         nn.init.kaiming_normal_(first_layer.weight, mode='fan_out', nonlinearity='relu')
                 
                 self.logger.info(f'Initialized MultiScaleAdapter {i} for channel {self.multi_scale_channels[i]} with {adapter.num_layers}-layer MLP')
             
-            # Initialize shared skip SS2D block
             if hasattr(self, 'skip_ss2d'):
                 with torch.no_grad():
                     if hasattr(self.skip_ss2d, 'in_proj'):
@@ -567,30 +415,10 @@ class MoEFSCILNeck(BaseModule):
                 self.logger.info('Initialized shared skip SS2D block for weighted feature processing')
     
     def forward(self, x, multi_scale_features=None):
-        """
-        Enhanced forward pass with MoE processing and multi-scale skip connections.
-        
-        Args:
-            x: Input tensor [B, C, H, W] or tuple (layer1, layer2, layer3, layer4)
-            multi_scale_features (list, optional): List of features from different backbone layers
-                                                  [layer1_feat, layer2_feat, layer3_feat]
-            
-        Returns:
-            dict: Output dictionary containing:
-                - 'out': Final enhanced MoE output with multi-scale fusion
-                - 'aux_loss': Load balancing auxiliary loss
-                - 'main': MoE output (for compatibility)
-                - 'residual': Residual connection
-                - 'skip_features': Skip features for analysis (if multi-scale enabled)
-        """
-        
-        # Enhanced MoE: Extract multi-scale features from ResNet tuple output (only when needed)
+
         if isinstance(x, tuple):
             x = x[-1]  # layer4 as main input
-            # Only extract multi-scale features when multi-scale skip is enabled
             if self.use_multi_scale_skip and multi_scale_features is None and len(x) > 1:
-                # ResNet with out_indices=(0,1,2,3) returns (layer1, layer2, layer3, layer4)
-                # Use layer1-3 as multi-scale features, layer4 as main input
                 multi_scale_features = x[:-1]  # [layer1, layer2, layer3]
         
         # multi_scale_features가 없으면 오류 발생 (multi-scale 사용시에만)
@@ -601,45 +429,33 @@ class MoEFSCILNeck(BaseModule):
         identity = x
         outputs = {}
         
-        # MLP projection (following original MambaNeck pattern)
         x_proj = self.mlp_proj(identity)  # [B, out_channels, H, W]
         x_proj = x_proj.permute(0, 2, 3, 1).view(B, H * W, -1)  # [B, H*W, out_channels]
         
-        # Add shared positional embeddings (like original)
         x_proj = x_proj + self.pos_embed  # [B, H*W, out_channels]
         
-        # Prepare spatial input for SS2D experts
         x_spatial = x_proj.view(B, H, W, -1)  # [B, H, W, out_channels]
-        
-        # SS2D MoE processing (each expert has its own SS2D block)
+
         moe_output, aux_loss = self.moe(x_spatial)
-        
-        # Initialize final output with MoE result
+
         final_output = moe_output
-        
-        # Collect skip connections for enhanced fusion (only when multi-scale is enabled)
+
         skip_features_spatial = [identity] if self.use_multi_scale_skip else None  # 공간 정보 유지
-        
-        # Multi-scale skip connections (Enhanced MoE feature)
+
         if self.use_multi_scale_skip and skip_features_spatial is not None:
             if multi_scale_features is not None:
-                # Use actual multi-scale features when available
                 for i, feat in enumerate(multi_scale_features):
                     if i < len(self.multi_scale_adapters):
-                        # MLP-based adapter processing (공간 정보 유지)
                         adapted_feat = self.multi_scale_adapters[i](feat)  # (B, out_channels, H, W)
                         skip_features_spatial.append(adapted_feat)
-                        
-                        # Log adapter usage for debugging
+
                         if hasattr(self, 'logger') and torch.rand(1).item() < 0.01:  # 1% 확률로 로그
                             self.logger.info(f"MultiScaleAdapter {i}: {feat.shape} → {adapted_feat.shape}")
 
-        # Cross-attention based skip connection fusion (Enhanced MoE)
         if self.use_multi_scale_skip and skip_features_spatial is not None and len(skip_features_spatial) > 1:
             # 모든 skip features는 이미 동일한 공간 크기 (MultiScaleAdapter에서 맞춤)
             B, C, H, W = skip_features_spatial[0].shape  # 기준 크기 (identity)
             
-            # Stack all skip features: [B, num_features, channels, H, W]
             skip_stack = torch.stack(skip_features_spatial, dim=1)  # [B, N, C, H, W]
             
             # 공간 차원을 유지하면서 가중치 계산을 위해 평균 풀링
@@ -682,17 +498,15 @@ class MoEFSCILNeck(BaseModule):
                 weight_info = ', '.join([f"{name}: {val:.3f}" for name, val in zip(feature_names, weight_values)])
                 self.logger.info(f"Cross-attention weights: {weight_info}")
         else:
-            # Simple output without residual connection
             final_output = moe_output
         
         # Prepare outputs
         outputs.update({
             'out': final_output,
             'aux_loss': aux_loss,
-            'main': moe_output,  # For compatibility with existing code
+            'main': moe_output,
         })
-        
-        # Add skip features for analysis (when multi-scale is enabled)
+
         if self.use_multi_scale_skip and skip_features_spatial is not None:
             outputs['skip_features'] = skip_features_spatial
         
