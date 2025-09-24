@@ -17,8 +17,6 @@ model = dict(
         num_layers=2,
         use_multi_scale_skip=False,
         multi_scale_channels=[128, 256, 512],
-        d_state=256,
-        ssm_expand_ratio=1.0,
     ),
     head=dict(
         type='ETFHead',
