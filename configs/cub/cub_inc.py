@@ -53,12 +53,11 @@ optimizer = dict(type='SGD',
                  weight_decay=0.0005,
                  paramwise_cfg=dict(
                      custom_keys={
-                         'neck.mlp_proj.': dict(lr_mult=1.2),
-                         'neck.ssm_block.': dict(lr_mult=1.2),
-                         'neck.residual_proj': dict(lr_mult=1.2),
+                         # 기본 MoE 컴포넌트들
+                         'neck.mlp_proj': dict(lr_mult=1.2),
                          'neck.pos_embed': dict(lr_mult=1.2),
                          'neck.moe.gate': dict(lr_mult=1.2),     
-                         'neck.moe.experts': dict(lr_mult=1.2),  
+                         'neck.moe.experts': dict(lr_mult=1.2),
                      }))
 
 optimizer_config = dict(grad_clip=None)

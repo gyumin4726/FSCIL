@@ -45,9 +45,20 @@ optimizer = dict(
     weight_decay=0.0005,
     paramwise_cfg=dict(
         custom_keys={
+            # 기본 MoE 컴포넌트들
             'backbone': dict(lr_mult=0.1),
             'neck.moe.gate': dict(lr_mult=1.5),     
-            'neck.moe.experts': dict(lr_mult=1.2),  
+            'neck.moe.experts': dict(lr_mult=1.2),
+            'neck.mlp_proj': dict(lr_mult=1.1),
+            'neck.pos_embed': dict(lr_mult=2.0),
+            
+            # MASC (Multi-Scale Attention Skip Connection) 관련 컴포넌트들
+            'neck.cross_attention': dict(lr_mult=1.0),        # 크로스 어텐션 메커니즘
+            'neck.query_proj': dict(lr_mult=1.0),            # 쿼리 프로젝션
+            'neck.key_proj': dict(lr_mult=1.0),              # 키 프로젝션
+            'neck.value_proj': dict(lr_mult=1.0),            # 밸류 프로젝션
+            'neck.skip_ss2d': dict(lr_mult=1.0),             # 스킵 연결용 SS2D 블록
+            'neck.multi_scale_adapters': dict(lr_mult=1.0),  # 멀티스케일 어댑터들
         }
     ))
 
