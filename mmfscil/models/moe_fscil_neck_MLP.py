@@ -1,17 +1,11 @@
-from collections import OrderedDict
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from einops import rearrange
 from mmcv.cnn import build_norm_layer
 from mmcv.runner import BaseModule
-from rope import *
-from timm.models.layers import trunc_normal_
 
 from mmcls.models.builder import NECKS
 from mmcls.utils import get_root_logger
-
-from .mamba_ssm.modules.mamba_simple import Mamba
 
 
 class MultiScaleAdapter(BaseModule):
@@ -331,11 +325,6 @@ class MoEFSCILNeckMLP(BaseModule):
             in_channels, out_channels, self.mid_channels, num_layers, feat_size
         )
 
-        self.pos_embed = nn.Parameter(
-            torch.zeros(1, feat_size * feat_size, out_channels)
-        )
-        trunc_normal_(self.pos_embed, std=.02)
-
         if self.use_multi_scale_skip:
             self.multi_scale_adapters = nn.ModuleList()
             for ch in self.multi_scale_channels:
@@ -443,11 +432,7 @@ class MoEFSCILNeckMLP(BaseModule):
         outputs = {}
         
         x_proj = self.mlp_proj(identity)  # [B, out_channels, H, W]
-        x_proj = x_proj.permute(0, 2, 3, 1).view(B, H * W, -1)  # [B, H*W, out_channels]
-        
-        x_proj = x_proj + self.pos_embed  # [B, H*W, out_channels]
-        
-        x_spatial = x_proj.view(B, H, W, -1)  # [B, H, W, out_channels]
+        x_spatial = x_proj.permute(0, 2, 3, 1)  # [B, H, W, out_channels]
 
         moe_output, aux_loss = self.moe(x_spatial)
 
@@ -490,17 +475,15 @@ class MoEFSCILNeckMLP(BaseModule):
             weighted_skip = (weights.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1) * skip_stack).sum(dim=1)  # [B, C, H, W]
             
             # Apply shared MLP to weighted skip features (공간 정보 활용)
-            weighted_skip_spatial = weighted_skip.permute(0, 2, 3, 1)  # [B, H, W, C]
             weighted_skip_flat = F.adaptive_avg_pool2d(weighted_skip, (1, 1)).view(B, -1)  # [B, C]
             skip_mlp_output = self.skip_mlp(weighted_skip_flat)  # [B, C]
             
             # 최종 출력: MoE + MLP-processed skip connections
             final_output = moe_output + 0.1 * skip_mlp_output
             
-            # 디버깅: cross-attention weights 출력 (MambaNeck과 동일한 형식)
+            # 디버깅: cross-attention weights 출력
             if hasattr(self, 'logger') and torch.rand(1).item() < 0.01:  # 1% 확률로 로그
                 weight_values = weights[0].detach().cpu().numpy()
-                # Generate dynamic feature names based on actual skip features (same as MambaNeck)
                 feature_names = ['layer4']
                 if self.use_multi_scale_skip:
                     feature_names.extend([f'layer{i+1}' for i in range(len(self.multi_scale_channels))])
