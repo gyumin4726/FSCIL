@@ -3,12 +3,10 @@ _base_ = [
     '../_base_/schedules/cub_80e.py', '../_base_/default_runtime.py'
 ]
 
-# CUB requires different inc settings
 inc_start = 100
 inc_end = 200
 inc_step = 10
 
-# model settings
 model = dict(backbone=dict(type='VMambaBackbone',
                            model_name='vmamba_base_s2l15',
                            pretrained_path='./vssm_base_0229_ckpt_epoch_237.pth',
@@ -17,20 +15,20 @@ model = dict(backbone=dict(type='VMambaBackbone',
                            channel_first=True),
              neck=dict(type='MoEFSCILNeck',
                        num_experts=4,
-                       top_k=1,
+                       top_k=2,
                        in_channels=1024,
                        out_channels=1024,
                        feat_size=7,
-                       num_layers=3,
                        d_state=256,
                        dt_rank=256,
                        ssm_expand_ratio=1.0,
+                       num_heads=8,
                        loss_weight_supp=100,
                        loss_weight_supp_novel=10,
                        loss_weight_sep=0.001,
                        loss_weight_sep_new=0.001,
                        param_avg_dim='0-1-3',
-                       use_aux_loss=True,
+                       use_aux_loss=False,
                        aux_loss_weight=0.01),
              head=dict(type='ETFHead',
                        in_channels=1024,
@@ -54,10 +52,10 @@ optimizer = dict(type='SGD',
                  paramwise_cfg=dict(
                      custom_keys={
                          # 기본 MoE 컴포넌트들
-                         'neck.mlp_proj': dict(lr_mult=1.2),
-                         'neck.pos_embed': dict(lr_mult=1.2),
-                         'neck.moe.gate': dict(lr_mult=1.2),     
-                         'neck.moe.experts': dict(lr_mult=1.2),
+                         'neck.mlp_proj': dict(lr_mult=0.8),
+                         'neck.pos_embed': dict(lr_mult=0.8),
+                         'neck.moe.gate': dict(lr_mult=0.8),     
+                         'neck.moe.experts': dict(lr_mult=0.8),
                      }))
 
 optimizer_config = dict(grad_clip=None)

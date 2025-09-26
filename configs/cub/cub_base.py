@@ -3,7 +3,6 @@ _base_ = [
     '../_base_/schedules/cub_80e.py', '../_base_/default_runtime.py'
 ]
 
-# CUB requires different inc settings
 inc_start = 100
 inc_end = 200
 inc_step = 10
@@ -16,17 +15,17 @@ model = dict(backbone=dict(type='VMambaBackbone',
                            channel_first=True),
              neck=dict(type='MoEFSCILNeck',
                        num_experts=4, 
-                       top_k=1,  
+                       top_k=2,  
                        in_channels=1024,
                        out_channels=1024,
                        feat_size=7,
-                       num_layers=3,
                        use_multi_scale_skip=True,
                        multi_scale_channels=[128, 256, 512],
                        d_state=256,
                        dt_rank=256,
+                       num_heads=8,
                        ssm_expand_ratio=1.0,
-                       use_aux_loss=True,
+                       use_aux_loss=False,
                        aux_loss_weight=0.01),
              head=dict(type='ETFHead',
                        in_channels=1024,
@@ -48,9 +47,9 @@ optimizer = dict(
             # 기본 MoE 컴포넌트들
             'backbone': dict(lr_mult=0.1),
             'neck.moe.gate': dict(lr_mult=1.5),     
-            'neck.moe.experts': dict(lr_mult=1.2),
+            'neck.moe.experts': dict(lr_mult=5.0),
             'neck.mlp_proj': dict(lr_mult=1.1),
-            'neck.pos_embed': dict(lr_mult=2.0),
+            'neck.pos_embed': dict(lr_mult=1.0),
             
             # MASC (Multi-Scale Attention Skip Connection) 관련 컴포넌트들
             'neck.cross_attention': dict(lr_mult=1.0),        # 크로스 어텐션 메커니즘
