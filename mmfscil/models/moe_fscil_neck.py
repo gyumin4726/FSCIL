@@ -19,36 +19,19 @@ class MultiScaleAdapter(BaseModule):
     def __init__(self,
                  in_channels,
                  out_channels=512,
-                 feat_size=7,
-                 num_layers=2,
-                 mid_channels=None):
+                 feat_size=7):
         super(MultiScaleAdapter, self).__init__(init_cfg=None)
         
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.feat_size = feat_size
-        self.num_layers = num_layers
-        self.mid_channels = in_channels * 2 if mid_channels is None else mid_channels
+
         # 1. MoE와 동일한 크기로 맞춤
         self.spatial_adapter = nn.AdaptiveAvgPool2d((feat_size, feat_size))
         
         # 2. 간단한 MLP 프로젝션
-        self.mlp_proj = self._build_mlp(in_channels, out_channels, self.mid_channels, num_layers, feat_size)
-        
-    def _build_mlp(self, in_channels, out_channels, mid_channels, num_layers, feat_size):
-        """Build MLP projection layers."""
-        layers = []
-        layers.append(nn.Conv2d(in_channels, mid_channels, kernel_size=1, padding=0, bias=True))
-        layers.append(build_norm_layer(dict(type='LN'), [mid_channels, feat_size, feat_size])[1])
-        layers.append(nn.LeakyReLU(0.1))
-        
-        if num_layers == 3:
-            layers.append(nn.Conv2d(mid_channels, mid_channels, kernel_size=1, bias=True))
-            layers.append(build_norm_layer(dict(type='LN'), [mid_channels, feat_size, feat_size])[1])
-            layers.append(nn.LeakyReLU(0.1))
-        
-        layers.append(nn.Conv2d(mid_channels, out_channels, kernel_size=1, bias=False))
-        return nn.Sequential(*layers)
+        # MLP 제거 - 단순한 1x1 conv로 채널 수만 맞춤
+        self.mlp_proj = nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=False)
         
     def forward(self, x):
         B, C, H, W = x.shape
@@ -70,7 +53,8 @@ class FSCILGate(nn.Module):
                  capacity_factor: float = 1.25,
                  epsilon: float = 1e-6,
                  use_aux_loss: bool = True,
-                 aux_loss_weight: float = 0.01):
+                 aux_loss_weight: float = 0.01,
+                 num_heads: int = 8):
         super().__init__()
         self.dim = dim
         self.num_experts = num_experts
@@ -79,19 +63,67 @@ class FSCILGate(nn.Module):
         self.epsilon = epsilon
         self.use_aux_loss = use_aux_loss
         self.aux_loss_weight = aux_loss_weight
+        self.num_heads = num_heads
         
-        # Gating network
-        self.w_gate = nn.Linear(dim, num_experts)
+        # Spatial attention based gating - 공간 정보 유지하면서 라우팅
+        self.spatial_attention = nn.MultiheadAttention(
+            embed_dim=dim,
+            num_heads=num_heads,
+            dropout=0.1,
+            batch_first=True
+        )
+        
+        # Expert query embeddings for spatial routing
+        self.expert_queries = nn.Parameter(torch.randn(num_experts, dim))
+        nn.init.xavier_uniform_(self.expert_queries)
+        
+        # Spatial gating projection
+        self.gate_proj = nn.Linear(dim, num_experts)
 
         
     def forward(self, x: torch.Tensor):
-
-        # Compute raw gate scores directly (no session context for stability)
-        raw_gate_scores = F.softmax(self.w_gate(x), dim=-1)  # [B, num_experts]
+        """
+        Spatial attention based gating - 공간 정보를 유지하면서 expert 라우팅
         
-        # Determine capacity and apply top-k gating (configurable)
-        capacity = int(self.capacity_factor * x.size(0))
-        top_k_scores, top_k_indices = raw_gate_scores.topk(self.top_k, dim=-1)  # Use configurable top_k
+        Args:
+            x: Input spatial features [B, H, W, dim]
+            
+        Returns:
+            gate_scores: Expert selection scores [B, num_experts]
+            aux_loss: Load balancing loss
+        """
+        B, H, W, dim = x.shape
+        
+        # Step 1: 공간 정보를 유지하면서 attention 계산
+        # x를 [B, H*W, dim] 형태로 변환 (공간 정보를 sequence로)
+        x_spatial = x.view(B, H * W, dim)  # [B, H*W, dim]
+        
+        # Expert queries: [num_experts, dim] -> [B, num_experts, dim]
+        expert_queries = self.expert_queries.unsqueeze(0).expand(B, -1, -1)  # [B, num_experts, dim]
+        
+        # Cross-attention: 각 spatial position이 expert queries와 상호작용
+        # Query: spatial features, Key&Value: expert queries
+        attended_features, attention_weights = self.spatial_attention(
+            query=x_spatial,  # [B, H*W, dim] - 각 spatial position
+            key=expert_queries,  # [B, num_experts, dim]
+            value=expert_queries  # [B, num_experts, dim]
+        )
+        
+        # Step 2: 공간별 expert 선호도를 global expert 선호도로 집계
+        # attention_weights: [B, H*W, num_experts] - 각 spatial position의 expert 선호도
+        spatial_expert_scores = attention_weights.mean(dim=1)  # [B, num_experts] - 공간 평균
+        
+        # Step 3: 최종 gate scores 생성
+        # attended_features의 global representation으로 보정
+        global_features = attended_features.mean(dim=1)  # [B, dim] - 공간 평균
+        global_gate_scores = F.softmax(self.gate_proj(global_features), dim=-1)  # [B, num_experts]
+        
+        # 공간 attention과 global gate scores 결합
+        raw_gate_scores = F.softmax(spatial_expert_scores + 0.1 * global_gate_scores, dim=-1)  # [B, num_experts]
+        
+        # Step 4: Top-k selection and capacity constraints
+        capacity = int(self.capacity_factor * B)
+        top_k_scores, top_k_indices = raw_gate_scores.topk(self.top_k, dim=-1)  # [B, top_k]
         
         # Create sparsity mask
         mask = torch.zeros_like(raw_gate_scores).scatter_(1, top_k_indices, 1)
@@ -101,21 +133,16 @@ class FSCILGate(nn.Module):
         denominators = masked_gate_scores.sum(0, keepdim=True) + self.epsilon
         gate_scores = (masked_gate_scores / denominators) * capacity 
         
-        # Compute auxiliary loss for load balancing (CORRECT Switch Transformer approach)
+        # Step 5: Compute auxiliary loss for load balancing
         aux_loss = None
         if self.use_aux_loss:
             # importance: 원본 softmax 확률의 평균 (soft routing 기준 기대 분포)
             importance = raw_gate_scores.mean(0)     # [num_experts]
             
-            # load: 실제 top-1 dispatch 결과 (hard routing 분포)
+            # load: 실제 top-k dispatch 결과 (hard routing 분포)
             load = mask.float().mean(0)              # [num_experts]
             
-            # load balancing loss: 진짜 "soft vs hard" 분포 비교
-            # raw_gate_scores vs actual selection으로 제대로 된 load balancing
-            #aux_loss = self.aux_loss_weight * ((load - importance) ** 2).mean()
-            
-            # Official Switch Transformer load balancing loss: importance * load (상관관계 최대화)
-            # 공식: mean(importance * load) * num_experts²
+            # Official Switch Transformer load balancing loss
             aux_loss = self.aux_loss_weight * (importance * load).mean() * (self.num_experts ** 2)
         
         return gate_scores, aux_loss
@@ -176,7 +203,8 @@ class MoEFSCIL(nn.Module):
                  dt_rank=256,
                  ssm_expand_ratio=1.0,
                  use_aux_loss=True,
-                 aux_loss_weight=0.01):
+                 aux_loss_weight=0.01,
+                 num_heads=8):
         super().__init__()
         self.dim = dim
         self.num_experts = num_experts
@@ -188,7 +216,8 @@ class MoEFSCIL(nn.Module):
             top_k=top_k,
             capacity_factor=capacity_factor,
             use_aux_loss=use_aux_loss,
-            aux_loss_weight=aux_loss_weight
+            aux_loss_weight=aux_loss_weight,
+            num_heads=num_heads
         )
         
         self.experts = nn.ModuleList([
@@ -206,14 +235,14 @@ class MoEFSCIL(nn.Module):
 
         B, H, W, dim = x.shape
         
-        # Flatten for gating decision (gate needs [B, dim] input)
-        x_flat = F.adaptive_avg_pool2d(x.permute(0, 3, 1, 2), (1, 1)).view(B, -1)  # [B, dim]
-        
-        # Get expert selection probabilities and routing mask
-        gate_scores, aux_loss = self.gate(x_flat)  # [B, num_experts]
+        # Pass spatial information directly to gate for spatial-aware routing
+        gate_scores, aux_loss = self.gate(x)  # [B, num_experts] - x is [B, H, W, dim]
         
         # Find top-k experts for each token (efficient sparse routing)
         top_k_scores, top_k_indices = gate_scores.topk(self.top_k, dim=-1)  # [B, top_k]
+        
+        # 가중치 정규화: 선택된 experts의 가중치 합이 1이 되도록
+        top_k_scores = F.softmax(top_k_scores, dim=-1)  # [B, top_k]
         
         # Debug: 10번째 forward마다 출력)
         if hasattr(self, 'debug_enabled') and self.debug_enabled:
@@ -273,8 +302,6 @@ class MoEFSCILNeck(BaseModule):
                  dt_rank=None,
                  ssm_expand_ratio=1.0,
                  feat_size=2,
-                 mid_channels=None,
-                 num_layers=2,
                  loss_weight_supp=0.0,
                  loss_weight_supp_novel=0.0,
                  loss_weight_sep=0.0,
@@ -283,7 +310,8 @@ class MoEFSCILNeck(BaseModule):
                  use_multi_scale_skip=False,
                  multi_scale_channels=[128, 256, 512],
                  use_aux_loss=True,
-                 aux_loss_weight=0.01):
+                 aux_loss_weight=0.01,
+                 num_heads=8):
         super(MoEFSCILNeck, self).__init__(init_cfg=None)
         
         self.in_channels = in_channels
@@ -291,8 +319,6 @@ class MoEFSCILNeck(BaseModule):
         self.num_experts = num_experts
         self.top_k = top_k
         self.feat_size = feat_size
-        self.mid_channels = in_channels * 2 if mid_channels is None else mid_channels
-        self.num_layers = num_layers
 
         self.use_multi_scale_skip = use_multi_scale_skip
         self.multi_scale_channels = multi_scale_channels
@@ -316,10 +342,6 @@ class MoEFSCILNeck(BaseModule):
         
         self.avg = nn.AdaptiveAvgPool2d((1, 1))
 
-        self.mlp_proj = self._build_mlp(
-            in_channels, out_channels, self.mid_channels, num_layers, feat_size
-        )
-
         self.pos_embed = nn.Parameter(
             torch.zeros(1, feat_size * feat_size, out_channels)
         )
@@ -333,8 +355,6 @@ class MoEFSCILNeck(BaseModule):
                     in_channels=ch,
                     out_channels=out_channels,
                     feat_size=self.feat_size,
-                    num_layers=self.num_layers,
-                    mid_channels=ch * 2 
                 )
                 self.multi_scale_adapters.append(adapter)
             
@@ -373,7 +393,8 @@ class MoEFSCILNeck(BaseModule):
             dt_rank=dt_rank if dt_rank is not None else d_state,
             ssm_expand_ratio=ssm_expand_ratio,
             use_aux_loss=use_aux_loss,
-            aux_loss_weight=aux_loss_weight
+            aux_loss_weight=aux_loss_weight,
+            num_heads=num_heads
         )
 
         self.moe.debug_enabled = True
@@ -382,23 +403,6 @@ class MoEFSCILNeck(BaseModule):
         
         self.init_weights()
         
-    def _build_mlp(self, in_channels, out_channels, mid_channels, num_layers, feat_size):
-        """Build MLP projection layers."""
-        layers = []
-        layers.append(nn.Conv2d(in_channels, mid_channels, kernel_size=1, padding=0, bias=True))
-        layers.append(build_norm_layer(dict(type='LN'), [mid_channels, feat_size, feat_size])[1])
-        layers.append(nn.LeakyReLU(0.1))
-        
-        if num_layers == 3:
-            layers.append(nn.Conv2d(mid_channels, mid_channels, kernel_size=1, bias=True))
-            layers.append(build_norm_layer(dict(type='LN'), [mid_channels, feat_size, feat_size])[1])
-            layers.append(nn.LeakyReLU(0.1))
-        
-        layers.append(nn.Conv2d(mid_channels, out_channels, kernel_size=1, bias=False))
-        return nn.Sequential(*layers)
-    
-
-    
     def init_weights(self):
         """Initialize weights with proper scaling for MoE and multi-scale adapters."""
         self.logger.info("🔧 Initializing MoE-FSCIL Neck weights...")
@@ -407,11 +411,11 @@ class MoEFSCILNeck(BaseModule):
             for i, adapter in enumerate(self.multi_scale_adapters):
 
                 if hasattr(adapter, 'mlp_proj'):
-                    first_layer = adapter.mlp_proj[0]  
-                    if isinstance(first_layer, nn.Conv2d):
-                        nn.init.kaiming_normal_(first_layer.weight, mode='fan_out', nonlinearity='relu')
+                    # mlp_proj는 단일 Conv2d 레이어이므로 직접 접근
+                    if isinstance(adapter.mlp_proj, nn.Conv2d):
+                        nn.init.kaiming_normal_(adapter.mlp_proj.weight, mode='fan_out', nonlinearity='relu')
                 
-                self.logger.info(f'Initialized MultiScaleAdapter {i} for channel {self.multi_scale_channels[i]} with {adapter.num_layers}-layer MLP')
+                self.logger.info(f'Initialized MultiScaleAdapter {i} for channel {self.multi_scale_channels[i]} with 1x1 conv')
             
             if hasattr(self, 'skip_ss2d'):
                 with torch.no_grad():
@@ -434,7 +438,7 @@ class MoEFSCILNeck(BaseModule):
         identity = x
         outputs = {}
         
-        x_proj = self.mlp_proj(identity)  # [B, out_channels, H, W]
+        x_proj = identity  # Identity mapping - 채널 수가 동일하므로 그대로 사용
         x_proj = x_proj.permute(0, 2, 3, 1).view(B, H * W, -1)  # [B, H*W, out_channels]
         
         x_proj = x_proj + self.pos_embed  # [B, H*W, out_channels]
