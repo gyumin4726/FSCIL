@@ -65,8 +65,16 @@ class FSCILGate(nn.Module):
         self.aux_loss_weight = aux_loss_weight
         self.num_heads = num_heads
         
-        # Spatial attention based gating - 공간 정보 유지하면서 라우팅
-        self.spatial_attention = nn.MultiheadAttention(
+        # Self-attention for spatial context learning (Query 생성용)
+        self.spatial_self_attention = nn.MultiheadAttention(
+            embed_dim=dim,
+            num_heads=num_heads,
+            dropout=0.1,
+            batch_first=True
+        )
+        
+        # Cross-attention for expert routing
+        self.expert_cross_attention = nn.MultiheadAttention(
             embed_dim=dim,
             num_heads=num_heads,
             dropout=0.1,
@@ -83,7 +91,9 @@ class FSCILGate(nn.Module):
         
     def forward(self, x: torch.Tensor):
         """
-        Spatial attention based gating - 공간 정보를 유지하면서 expert 라우팅
+        Self-attention + Cross-attention based gating
+        - Self-attention으로 spatial context 학습
+        - Cross-attention으로 expert routing
         
         Args:
             x: Input spatial features [B, H, W, dim]
@@ -94,34 +104,36 @@ class FSCILGate(nn.Module):
         """
         B, H, W, dim = x.shape
         
-        # Step 1: 공간 정보를 유지하면서 attention 계산
-        # x를 [B, H*W, dim] 형태로 변환 (공간 정보를 sequence로)
+        # Step 1: Convert to sequence format
         x_spatial = x.view(B, H * W, dim)  # [B, H*W, dim]
         
-        # Expert queries: [num_experts, dim] -> [B, num_experts, dim]
-        expert_queries = self.expert_queries.unsqueeze(0).expand(B, -1, -1)  # [B, num_experts, dim]
-        
-        # Cross-attention: 각 spatial position이 expert queries와 상호작용
-        # Query: spatial features, Key&Value: expert queries
-        attended_features, attention_weights = self.spatial_attention(
-            query=x_spatial,  # [B, H*W, dim] - 각 spatial position
-            key=expert_queries,  # [B, num_experts, dim]
-            value=expert_queries  # [B, num_experts, dim]
+        # Step 2: Self-attention for spatial context learning (Query 생성)
+        contextualized_features, _ = self.spatial_self_attention(
+            query=x_spatial,    # [B, H*W, dim]
+            key=x_spatial,      # [B, H*W, dim] 
+            value=x_spatial     # [B, H*W, dim]
         )
         
-        # Step 2: 공간별 expert 선호도를 global expert 선호도로 집계
+        # Step 3: Expert queries 준비
+        expert_queries = self.expert_queries.unsqueeze(0).expand(B, -1, -1)  # [B, num_experts, dim]
+        
+        # Step 4: Cross-attention for expert routing
+        # Query: contextualized features, Key&Value: expert queries
+        attended_features, attention_weights = self.expert_cross_attention(
+            query=contextualized_features,  # [B, H*W, dim] - self-attention으로 contextualized된 features
+            key=expert_queries,            # [B, num_experts, dim]
+            value=expert_queries           # [B, num_experts, dim]
+        )
+        
+        # Step 5: 공간별 expert 선호도를 global expert 선호도로 집계
         # attention_weights: [B, H*W, num_experts] - 각 spatial position의 expert 선호도
         spatial_expert_scores = attention_weights.mean(dim=1)  # [B, num_experts] - 공간 평균
         
-        # Step 3: 최종 gate scores 생성
-        # attended_features의 global representation으로 보정
-        global_features = attended_features.mean(dim=1)  # [B, dim] - 공간 평균
-        global_gate_scores = F.softmax(self.gate_proj(global_features), dim=-1)  # [B, num_experts]
+        # Step 6: 최종 gate scores 생성
+        # Cross-attention 결과만 사용
+        raw_gate_scores = F.softmax(spatial_expert_scores, dim=-1)  # [B, num_experts]
         
-        # 공간 attention과 global gate scores 결합
-        raw_gate_scores = F.softmax(spatial_expert_scores + 0.1 * global_gate_scores, dim=-1)  # [B, num_experts]
-        
-        # Step 4: Top-k selection and capacity constraints
+        # Step 7: Top-k selection and capacity constraints
         capacity = int(self.capacity_factor * B)
         top_k_scores, top_k_indices = raw_gate_scores.topk(self.top_k, dim=-1)  # [B, top_k]
         
@@ -133,7 +145,7 @@ class FSCILGate(nn.Module):
         denominators = masked_gate_scores.sum(0, keepdim=True) + self.epsilon
         gate_scores = (masked_gate_scores / denominators) * capacity 
         
-        # Step 5: Compute auxiliary loss for load balancing
+        # Step 8: Compute auxiliary loss for load balancing
         aux_loss = None
         if self.use_aux_loss:
             # importance: 원본 softmax 확률의 평균 (soft routing 기준 기대 분포)
@@ -369,21 +381,6 @@ class MoEFSCILNeck(BaseModule):
                 use_out_norm=True
             )
 
-        if self.use_multi_scale_skip:
-            num_skip_sources = 1  # identity
-            num_skip_sources += len(self.multi_scale_channels)
-            
-            self.cross_attention = nn.MultiheadAttention(
-                embed_dim=out_channels,
-                num_heads=8,
-                dropout=0.1,
-                batch_first=True
-            )
-            
-            self.query_proj = nn.Linear(out_channels, out_channels)
-            self.key_proj = nn.Linear(out_channels, out_channels)
-            self.value_proj = nn.Linear(out_channels, out_channels)
-
         self.moe = MoEFSCIL(
             dim=out_channels,
             num_experts=num_experts,
@@ -400,11 +397,15 @@ class MoEFSCILNeck(BaseModule):
         self.moe.debug_enabled = True
         self.moe.forward_count = 0 
         
-        
-        self.init_weights()
+        # 초기화 플래그 추가
+        self._weights_initialized = False
         
     def init_weights(self):
         """Initialize weights with proper scaling for MoE and multi-scale adapters."""
+        # 이미 초기화되었으면 스킵
+        if self._weights_initialized:
+            return
+            
         self.logger.info("🔧 Initializing MoE-FSCIL Neck weights...")
         
         if self.use_multi_scale_skip:
@@ -422,6 +423,9 @@ class MoEFSCILNeck(BaseModule):
                     if hasattr(self.skip_ss2d, 'in_proj'):
                         self.skip_ss2d.in_proj.weight.data *= 0.1
                 self.logger.info('Initialized shared skip SS2D block for weighted feature processing')
+        
+        # 초기화 완료 플래그 설정
+        self._weights_initialized = True
     
     def forward(self, x, multi_scale_features=None):
 
@@ -467,20 +471,9 @@ class MoEFSCILNeck(BaseModule):
             
             skip_stack = torch.stack(skip_features_spatial, dim=1)  # [B, N, C, H, W]
             
-            # 공간 차원을 유지하면서 가중치 계산을 위해 평균 풀링
-            skip_flat = skip_stack.mean(dim=(-2, -1))  # [B, N, C] - 공간 정보 압축
-            
-            # Prepare Query (from MoE output), Key, Value (from skip features)
-            query = self.query_proj(moe_output).unsqueeze(1)  # [B, 1, C]
-            keys = self.key_proj(skip_flat)         # [B, N, C]
-            values = self.value_proj(skip_flat)     # [B, N, C]
-            
-            # Multi-head cross-attention
-            attended_features, attention_weights = self.cross_attention(query, keys, values)
-            # attention_weights: [B, 1, N]
-            
-            # softmax 정규화 (안정성 보강)
-            weights = torch.softmax(attention_weights.squeeze(1), dim=-1)  # [B, N]
+            # 하드코딩된 균등 가중치 사용 (연산량 절감)
+            num_features = len(skip_features_spatial)
+            weights = torch.full((B, num_features), 1.0 / num_features, device=skip_stack.device, dtype=skip_stack.dtype)  # [B, N]
             
             # Skip features에 가중치 적용 (공간 정보 유지)
             weighted_skip = (weights.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1) * skip_stack).sum(dim=1)  # [B, C, H, W]
@@ -496,16 +489,16 @@ class MoEFSCILNeck(BaseModule):
             # 최종 출력: MoE + SS2D-processed skip connections
             final_output = moe_output + 0.1 * skip_ss2d_output
             
-            # 디버깅: cross-attention weights 출력 (MambaNeck과 동일한 형식)
+            # 디버깅: 하드코딩된 균등 가중치 출력
             if hasattr(self, 'logger') and torch.rand(1).item() < 0.01:  # 1% 확률로 로그
                 weight_values = weights[0].detach().cpu().numpy()
-                # Generate dynamic feature names based on actual skip features (same as MambaNeck)
+                # Generate dynamic feature names based on actual skip features
                 feature_names = ['layer4']
                 if self.use_multi_scale_skip:
                     feature_names.extend([f'layer{i+1}' for i in range(len(self.multi_scale_channels))])
                 feature_names = feature_names[:len(skip_features_spatial)]
                 weight_info = ', '.join([f"{name}: {val:.3f}" for name, val in zip(feature_names, weight_values)])
-                self.logger.info(f"Cross-attention weights: {weight_info}")
+                self.logger.info(f"Hard-coded uniform weights: {weight_info}")
         else:
             final_output = moe_output
         
