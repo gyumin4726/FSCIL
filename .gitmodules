@@ -1,9 +1,3 @@
 [submodule "VMamba"]
 	path = VMamba
 	url = https://github.com/MzeroMiko/VMamba
-[submodule "MoE-Mamba"]
-	path = MoE-Mamba
-	url = https://github.com/kyegomez/MoE-Mamba
-[submodule "SimPO"]
-	path = SimPO
-	url = https://github.com/princeton-nlp/SimPO.git
