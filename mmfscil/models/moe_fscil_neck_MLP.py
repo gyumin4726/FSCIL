@@ -387,7 +387,7 @@ class MoEFSCILNeckMLP(BaseModule):
         if self._weights_initialized:
             return
             
-        self.logger.info("🔧 Initializing MoE-FSCIL Neck (MLP) weights...")
+        self.logger.info("🔧 Initializing MoE-FSCIL Neck (MLP) weights with default initialization...")
         
         if self.use_multi_scale_skip:
             for i, adapter in enumerate(self.multi_scale_adapters):
@@ -399,14 +399,6 @@ class MoEFSCILNeckMLP(BaseModule):
                 
                 self.logger.info(f'Initialized MultiScaleAdapter {i} for channel {self.multi_scale_channels[i]} with 1x1 conv')
         
-        # MLP experts 초기화
-        for i, expert in enumerate(self.moe.experts):
-            for module in expert.ffn:
-                if isinstance(module, nn.Linear):
-                    nn.init.xavier_uniform_(module.weight)
-                    if module.bias is not None:
-                        nn.init.zeros_(module.bias)
-            self.logger.info(f'Initialized MLP Expert {i} with Xavier uniform initialization')
         
         # 초기화 완료 플래그 설정
         self._weights_initialized = True
