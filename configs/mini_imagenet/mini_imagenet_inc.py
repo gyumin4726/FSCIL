@@ -24,12 +24,6 @@ model = dict(backbone=dict(type='VMambaBackbone',
                        ssm_expand_ratio=1.0,  # SS2D expansion ratio
                        use_aux_loss=True,
                        aux_loss_weight=0.01,  # Load balancing loss weight
-                       # FSCIL loss parameters (for compatibility)
-                       loss_weight_supp=100,
-                       loss_weight_supp_novel=0.0,
-                       loss_weight_sep=0.0,
-                       loss_weight_sep_new=0.5,
-                       param_avg_dim='0-1-3',
                        # Enhanced skip connection settings (MASC-M)
                        use_multi_scale_skip=False,
                        multi_scale_channels=[128, 256, 512]),

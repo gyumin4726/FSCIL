@@ -314,11 +314,6 @@ class MoEFSCILNeck(BaseModule):
                  dt_rank=None,
                  ssm_expand_ratio=1.0,
                  feat_size=2,
-                 loss_weight_supp=0.0,
-                 loss_weight_supp_novel=0.0,
-                 loss_weight_sep=0.0,
-                 loss_weight_sep_new=0.0,
-                 param_avg_dim='0-1-3',
                  use_multi_scale_skip=False,
                  multi_scale_channels=[128, 256, 512],
                  use_aux_loss=True,
@@ -336,13 +331,6 @@ class MoEFSCILNeck(BaseModule):
         self.multi_scale_channels = multi_scale_channels
         self.use_aux_loss = use_aux_loss
 
-        self.loss_weight_supp = loss_weight_supp
-        self.loss_weight_supp_novel = loss_weight_supp_novel
-
-        self.loss_weight_sep = loss_weight_sep
-        self.loss_weight_sep_new = loss_weight_sep_new
-        
-        self.param_avg_dim = [int(item) for item in param_avg_dim.split('-')]
         
         self.logger = get_root_logger()
         self.logger.info(f"MoE-FSCIL Neck initialized: {num_experts} experts, top-{top_k} activation")

@@ -173,12 +173,6 @@ class ImageClassifierCIL(BaseClassifier):
         self.calculate_norms(losses, indices_base, indices_novel, x, x_main,
                              x_residual, dts, Bs, Cs, dts_new, Bs_new, Cs_new)
 
-        # Losses for feature separation and suppression
-        if self.mamba_neck:
-            self.calculate_class_sensitive_losses(losses, indices_base,
-                                                  indices_novel, x_main, dts,
-                                                  Bs, Cs, dts_new, Bs_new,
-                                                  Cs_new)
 
         # mixup feat when mixup > 0, this cannot be with augment mixup
         if self.mixup > 0. and self.mixup_prob > 0. and np.random.random() > (
@@ -196,87 +190,8 @@ class ImageClassifierCIL(BaseClassifier):
 
         return losses
 
-    def calculate_sep_loss(self, params, indices_base, indices_novel):
-        """
-        Calculates a separation loss by comparing the average features of base and novel classes.
 
-        Args:
-            params (Tensor): Features from which to calculate separation.
-            indices_base (Tensor): Boolean tensor indicating base class indices.
-            indices_novel (Tensor): Boolean tensor indicating novel class indices.
 
-        Returns:
-            Tensor: The mean separation loss.
-        """
-        avg_features = []
-        base_params = params[indices_base]
-        novel_params = params[indices_novel]
-        avg_features.append(
-            base_params.mean(self.neck.param_avg_dim).reshape((1, -1)))
-        avg_features.append(
-            novel_params.mean(self.neck.param_avg_dim).reshape((1, -1)))
-
-        avg_features = torch.cat(avg_features, dim=0)
-        normalized_input = F.normalize(avg_features, dim=-1)
-        similarity_matrix = torch.matmul(normalized_input,
-                                         normalized_input.transpose(0, 1))
-        confusion_matrix = torch.abs(
-            torch.eye(similarity_matrix.shape[0], device=params.device) -
-            similarity_matrix)
-        return torch.mean(confusion_matrix)
-
-    def calculate_sep_losses(self, losses, indices_base, indices_novel, dts,
-                             Bs, Cs, dts_new, Bs_new, Cs_new):
-        """
-        Calculates separation losses for ssm branches.
-
-        Args:
-            losses (dict): Losses dictionary to update.
-            indices_base (Tensor): Indices for base class examples.
-            indices_novel (Tensor): Indices for novel class examples.
-            dts, Bs, Cs, dts_new, Bs_new, Cs_new (Tensor): Feature tensors for calculating separation.
-        """
-        if self.neck.loss_weight_sep > 0:
-            for key, value in [('dts', dts), ('Bs', Bs), ('Cs', Cs)]:
-                if value is not None:
-                    losses[
-                        f'loss_sep_{key}_base'] = self.neck.loss_weight_sep * self.calculate_sep_loss(
-                            value, indices_base, indices_novel)
-        if self.neck.loss_weight_sep_new > 0:
-            for key, value in [('dts_new', dts_new), ('Bs_new', Bs_new),
-                               ('Cs_new', Cs_new)]:
-                if value is not None:
-                    losses[
-                        f'loss_sep_{key}'] = self.neck.loss_weight_sep_new * self.calculate_sep_loss(
-                            value, indices_base, indices_novel)
-
-    def calculate_class_sensitive_losses(self, losses, indices_base,
-                                         indices_novel, x_main, dts, Bs, Cs,
-                                         dts_new, Bs_new, Cs_new):
-        """
-        Computes class-sensitive losses for feature suppression and separation.
-
-        Args:
-            losses (dict): Dictionary to store computed losses.
-            indices_base (Tensor): Indices for base class examples.
-            indices_novel (Tensor): Indices for novel class examples.
-            x_main, dts, Bs, Cs, dts_new, Bs_new, Cs_new (Tensor): Feature tensors for calculating losses.
-        """
-        num_base = indices_base.sum()
-        num_novel = indices_novel.sum()
-        dist.all_reduce(num_base, op=dist.ReduceOp.MIN)
-        dist.all_reduce(num_novel, op=dist.ReduceOp.MIN)
-        # Feature suppression and separation losses
-        if num_base > 0 and self.neck.loss_weight_supp > 0:
-            losses['loss_supp_base'] = self.neck.loss_weight_supp * torch.norm(
-                x_main[indices_base]) / torch.numel(x_main[indices_base])
-        if num_novel > 0 and self.neck.loss_weight_supp_novel > 0:
-            losses[
-                'loss_supp_novel'] = -self.neck.loss_weight_supp_novel * torch.norm(
-                    x_main[indices_novel]) / torch.numel(x_main[indices_novel])
-        if num_base > 0 and num_novel > 0:
-            self.calculate_sep_losses(losses, indices_base, indices_novel, dts,
-                                      Bs, Cs, dts_new, Bs_new, Cs_new)
 
     def calculate_norms(self, losses, indices_base, indices_novel, x, x_main,
                         x_residual, dts, Bs, Cs, dts_new, Bs_new, Cs_new):
