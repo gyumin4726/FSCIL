@@ -166,8 +166,8 @@ class SS2DExpert(nn.Module):
     def __init__(self,
                  dim,
                  expert_id=0,
-                 d_state=256,
-                 dt_rank=256,
+                 d_state=16,
+                 dt_rank=64,
                  ssm_expand_ratio=1.0):
         super().__init__()
         self.dim = dim
@@ -211,8 +211,8 @@ class MoEFSCIL(nn.Module):
                  top_k=2,
                  feat_size=7,
                  capacity_factor=1.25,
-                 d_state=256,
-                 dt_rank=256,
+                 d_state=16,
+                 dt_rank=64,
                  ssm_expand_ratio=1.0,
                  use_aux_loss=True,
                  aux_loss_weight=0.01,
@@ -310,8 +310,8 @@ class MoEFSCILNeck(BaseModule):
                  out_channels=512,
                  num_experts=4,
                  top_k=2,
-                 d_state=256,
-                 dt_rank=None,
+                 d_state=16,
+                 dt_rank=64,
                  ssm_expand_ratio=1.0,
                  feat_size=2,
                  use_multi_scale_skip=False,
