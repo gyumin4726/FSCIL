@@ -45,13 +45,85 @@ class MultiScaleAdapter(BaseModule):
         return x  # (B, out_channels, feat_size, feat_size) - 공간 정보 유지
 
 
+class MultiScaleRouter(nn.Module):
+    """Multi-Scale Layer Router for dynamic auxiliary layer weighting"""
+    def __init__(self,
+                 dim,
+                 num_aux_layers: int = 3,  # layer1, layer2, layer3
+                 num_heads: int = 8):
+        super().__init__()
+        self.dim = dim
+        self.num_aux_layers = num_aux_layers
+        self.num_heads = num_heads
+        
+        # Self-attention for spatial context learning
+        self.spatial_self_attention = nn.MultiheadAttention(
+            embed_dim=dim,
+            num_heads=num_heads,
+            dropout=0.1,
+            batch_first=True
+        )
+        
+        # Cross-attention for auxiliary layer routing
+        self.aux_layer_cross_attention = nn.MultiheadAttention(
+            embed_dim=dim,
+            num_heads=num_heads,
+            dropout=0.1,
+            batch_first=True
+        )
+        
+    def forward(self, layer4_features: torch.Tensor, aux_layer_features: list):
+        """
+        Multi-Scale Auxiliary Layer Router
+        
+        Args:
+            layer4_features: Layer4 spatial features [B, H, W, dim] (base/query)
+            aux_layer_features: List of auxiliary layer features [layer1, layer2, layer3]
+            
+        Returns:
+            aux_weights: Auxiliary layer weights [B, num_aux_layers] (can be > 1.0)
+        """
+        B, H, W, dim = layer4_features.shape
+        
+        # Step 1: Convert layer4 (query) to sequence format
+        layer4_spatial = layer4_features.view(B, H * W, dim)  # [B, H*W, dim]
+        
+        # Step 2: Self-attention on layer4 for spatial context learning
+        contextualized_layer4, _ = self.spatial_self_attention(
+            query=layer4_spatial,
+            key=layer4_spatial,
+            value=layer4_spatial
+        )
+        
+        # Step 3: Prepare auxiliary layer features as key/value
+        # Stack auxiliary layers and convert to sequence format
+        aux_stack = torch.stack(aux_layer_features, dim=1)  # [B, num_aux_layers, C, H, W]
+        aux_spatial = aux_stack.view(B, self.num_aux_layers, H * W, dim)  # [B, num_aux_layers, H*W, dim]
+        
+        # Global average pooling for each auxiliary layer to get layer-level representations
+        aux_layer_reps = aux_spatial.mean(dim=2)  # [B, num_aux_layers, dim]
+        
+        # Step 4: Cross-attention between layer4 (query) and auxiliary layers (key/value)
+        attended_features, attention_weights = self.aux_layer_cross_attention(
+            query=contextualized_layer4,  # [B, H*W, dim] - layer4 contextualized features
+            key=aux_layer_reps,          # [B, num_aux_layers, dim] - auxiliary layer representations
+            value=aux_layer_reps         # [B, num_aux_layers, dim] - auxiliary layer representations
+        )
+        
+        # Step 5: Aggregate spatial attention to get auxiliary layer importance
+        spatial_aux_scores = attention_weights.mean(dim=1)  # [B, num_aux_layers]
+        
+        # Step 6: Generate auxiliary weights (NO softmax - can be any positive value)
+        aux_weights = torch.sigmoid(spatial_aux_scores)  # [B, num_aux_layers] - range [0, 1]
+        
+        return aux_weights
+
+
 class FSCILGate(nn.Module):
     def __init__(self,
                  dim,
                  num_experts: int,
                  top_k: int = 1,
-                 capacity_factor: float = 1.25,
-                 epsilon: float = 1e-6,
                  use_aux_loss: bool = True,
                  aux_loss_weight: float = 0.01,
                  num_heads: int = 8):
@@ -59,8 +131,6 @@ class FSCILGate(nn.Module):
         self.dim = dim
         self.num_experts = num_experts
         self.top_k = top_k
-        self.capacity_factor = capacity_factor
-        self.epsilon = epsilon
         self.use_aux_loss = use_aux_loss
         self.aux_loss_weight = aux_loss_weight
         self.num_heads = num_heads
@@ -133,17 +203,15 @@ class FSCILGate(nn.Module):
         # Cross-attention 결과만 사용
         raw_gate_scores = F.softmax(spatial_expert_scores, dim=-1)  # [B, num_experts]
         
-        # Step 7: Top-k selection and capacity constraints
-        capacity = int(self.capacity_factor * B)
+        # Step 7: Top-k selection (no capacity constraints - batch-level routing)
         top_k_scores, top_k_indices = raw_gate_scores.topk(self.top_k, dim=-1)  # [B, top_k]
         
         # Create sparsity mask
         mask = torch.zeros_like(raw_gate_scores).scatter_(1, top_k_indices, 1)
         masked_gate_scores = raw_gate_scores * mask
         
-        # Normalize gate scores for dispatch
-        denominators = masked_gate_scores.sum(0, keepdim=True) + self.epsilon
-        gate_scores = (masked_gate_scores / denominators) * capacity 
+        # Normalize gate scores
+        gate_scores = masked_gate_scores 
         
         # Step 8: Compute auxiliary loss for load balancing
         aux_loss = None
@@ -186,8 +254,6 @@ class SS2DExpert(nn.Module):
             use_out_norm=True
         )
 
-        self.norm = nn.LayerNorm(dim)
-        
         self.avg_pool = nn.AdaptiveAvgPool2d((1, 1))
         
     def forward(self, x):
@@ -198,7 +264,7 @@ class SS2DExpert(nn.Module):
         x_expert = x_expert.permute(0, 3, 1, 2)  # [B, dim, H, W]
         x_expert = self.avg_pool(x_expert).view(B, -1)  # [B, dim]
 
-        output = self.norm(x_expert)
+        output = x_expert
         
         return output
 
@@ -210,7 +276,6 @@ class MoEFSCIL(nn.Module):
                  num_experts=4,
                  top_k=2,
                  feat_size=7,
-                 capacity_factor=1.25,
                  d_state=16,
                  dt_rank=64,
                  ssm_expand_ratio=1.0,
@@ -226,7 +291,6 @@ class MoEFSCIL(nn.Module):
             dim=dim,
             num_experts=num_experts,
             top_k=top_k,
-            capacity_factor=capacity_factor,
             use_aux_loss=use_aux_loss,
             aux_loss_weight=aux_loss_weight,
             num_heads=num_heads
@@ -336,9 +400,10 @@ class MoEFSCILNeck(BaseModule):
         self.logger.info(f"MoE-FSCIL Neck initialized: {num_experts} experts, top-{top_k} activation")
         
         if self.use_multi_scale_skip:
-            self.logger.info(f"Enhanced MoE with Multi-Scale Skip Connections: {len(self.multi_scale_channels)} layers")
+            self.logger.info(f"Enhanced MoE with Layer4-based Auxiliary Fusion: {len(self.multi_scale_channels)} auxiliary layers")
             self.logger.info(f"Multi-Scale Adapters: {self.multi_scale_channels} → {out_channels} channels")
-            self.logger.info(f"Shared SS2D for skip connection processing after weighted combination")
+            self.logger.info(f"Dynamic Auxiliary Router with {num_heads}-head attention for auxiliary layer weighting")
+            self.logger.info(f"Layer4 (base) + dynamically weighted auxiliary layers (layer1,2,3) → MoE")
         
         self.avg = nn.AdaptiveAvgPool2d((1, 1))
 
@@ -349,8 +414,9 @@ class MoEFSCILNeck(BaseModule):
 
         if self.use_multi_scale_skip:
             self.multi_scale_adapters = nn.ModuleList()
+            # layer4는 이미 out_channels와 동일하므로 adapter 불필요
+            # layer1, layer2, layer3만 adapter 필요
             for ch in self.multi_scale_channels:
-
                 adapter = MultiScaleAdapter(
                     in_channels=ch,
                     out_channels=out_channels,
@@ -358,15 +424,11 @@ class MoEFSCILNeck(BaseModule):
                 )
                 self.multi_scale_adapters.append(adapter)
             
-            directions = ('h', 'h_flip', 'v', 'v_flip')
-            self.skip_ss2d = SS2D(
-                out_channels,
-                ssm_ratio=ssm_expand_ratio,
-                d_state=d_state,
-                dt_rank=dt_rank if dt_rank is not None else d_state,
-                directions=directions,
-                use_out_proj=False,
-                use_out_norm=True
+            # Multi-Scale Auxiliary Router 추가
+            self.multi_scale_router = MultiScaleRouter(
+                dim=out_channels,
+                num_aux_layers=len(self.multi_scale_channels),  # [layer1, layer2, layer3] only
+                num_heads=num_heads
             )
 
         self.moe = MoEFSCIL(
@@ -398,7 +460,6 @@ class MoEFSCILNeck(BaseModule):
         
         if self.use_multi_scale_skip:
             for i, adapter in enumerate(self.multi_scale_adapters):
-
                 if hasattr(adapter, 'mlp_proj'):
                     # mlp_proj는 단일 Conv2d 레이어이므로 직접 접근
                     if isinstance(adapter.mlp_proj, nn.Conv2d):
@@ -406,11 +467,9 @@ class MoEFSCILNeck(BaseModule):
                 
                 self.logger.info(f'Initialized MultiScaleAdapter {i} for channel {self.multi_scale_channels[i]} with 1x1 conv')
             
-            if hasattr(self, 'skip_ss2d'):
-                with torch.no_grad():
-                    if hasattr(self.skip_ss2d, 'in_proj'):
-                        self.skip_ss2d.in_proj.weight.data *= 0.1
-                self.logger.info('Initialized shared skip SS2D block for weighted feature processing')
+            # Multi-Scale Auxiliary Router 초기화
+            if hasattr(self, 'multi_scale_router'):
+                self.logger.info('Initialized Multi-Scale Auxiliary Router for dynamic auxiliary layer weighting')
         
         # 초기화 완료 플래그 설정
         self._weights_initialized = True
@@ -430,74 +489,63 @@ class MoEFSCILNeck(BaseModule):
         identity = x
         outputs = {}
         
-        x_proj = identity  # Identity mapping - 채널 수가 동일하므로 그대로 사용
+        # ===== NEW: Layer4-based Multi-Scale Auxiliary Fusion =====
+        if self.use_multi_scale_skip:
+            # Step 1: Prepare auxiliary layer features (layer1, layer2, layer3)
+            aux_layer_features = []
+            if multi_scale_features is not None:
+                for i, feat in enumerate(multi_scale_features):
+                    if i < len(self.multi_scale_adapters):
+                        adapted_feat = self.multi_scale_adapters[i](feat)  # (B, out_channels, feat_size, feat_size)
+                        aux_layer_features.append(adapted_feat)
+            
+            # Step 2: Get auxiliary weights from Multi-Scale Router
+            # Query: layer4, Key/Value: auxiliary layers (layer1, layer2, layer3)
+            layer4_spatial = identity.permute(0, 2, 3, 1)  # [B, H, W, out_channels]
+            aux_weights = self.multi_scale_router(layer4_spatial, aux_layer_features)  # [B, num_aux_layers]
+            
+            # Step 3: Apply auxiliary weights to auxiliary layers
+            auxiliary_contribution = torch.zeros_like(identity)  # [B, C, H, W]
+            for i, aux_feat in enumerate(aux_layer_features):
+                auxiliary_contribution += aux_weights[:, i:i+1, None, None] * aux_feat
+            
+            # Step 4: Final fusion = Layer4 (base) + weighted auxiliary contributions
+            x_for_moe = identity + auxiliary_contribution  # Layer4는 그대로, 보조 레이어들만 가중치로 추가
+            
+            # Debug logging
+            if hasattr(self, 'logger') and torch.rand(1).item() < 0.01:  # 1% 확률로 로그
+                weight_values = aux_weights[0].detach().cpu().numpy()
+                aux_names = [f'layer{i+1}' for i in range(len(self.multi_scale_channels))]
+                weight_info = ', '.join([f"{name}: {val:.3f}" for name, val in zip(aux_names, weight_values)])
+                self.logger.info(f"Auxiliary Layer Weights (added to Layer4): {weight_info}")
+        else:
+            # No multi-scale fusion, use original layer4
+            x_for_moe = identity
+        
+        # Step 5: Prepare input for MoE
+        x_proj = x_for_moe  # Use fused features instead of just layer4
         x_proj = x_proj.permute(0, 2, 3, 1).view(B, H * W, -1)  # [B, H*W, out_channels]
         
         x_proj = x_proj + self.pos_embed  # [B, H*W, out_channels]
         
         x_spatial = x_proj.view(B, H, W, -1)  # [B, H, W, out_channels]
 
-        moe_output, aux_loss = self.moe(x_spatial)
+        # Step 6: MoE processing with fused multi-scale features
+        moe_output, moe_aux_loss = self.moe(x_spatial)
 
+        # ===== REMOVED: Old residual skip connection logic =====
+        # Multi-scale fusion is now done BEFORE MoE, so no need for post-MoE residual
         final_output = moe_output
-
-        skip_features_spatial = [identity] if self.use_multi_scale_skip else None  # 공간 정보 유지
-
-        if self.use_multi_scale_skip and skip_features_spatial is not None:
-            if multi_scale_features is not None:
-                for i, feat in enumerate(multi_scale_features):
-                    if i < len(self.multi_scale_adapters):
-                        adapted_feat = self.multi_scale_adapters[i](feat)  # (B, out_channels, H, W)
-                        skip_features_spatial.append(adapted_feat)
-
-                        if hasattr(self, 'logger') and torch.rand(1).item() < 0.01:  # 1% 확률로 로그
-                            self.logger.info(f"MultiScaleAdapter {i}: {feat.shape} → {adapted_feat.shape}")
-
-        if self.use_multi_scale_skip and skip_features_spatial is not None and len(skip_features_spatial) > 1:
-            # 모든 skip features는 이미 동일한 공간 크기 (MultiScaleAdapter에서 맞춤)
-            B, C, H, W = skip_features_spatial[0].shape  # 기준 크기 (identity)
-            
-            skip_stack = torch.stack(skip_features_spatial, dim=1)  # [B, N, C, H, W]
-            
-            # 하드코딩된 균등 가중치 사용 (연산량 절감)
-            num_features = len(skip_features_spatial)
-            weights = torch.full((B, num_features), 1.0 / num_features, device=skip_stack.device, dtype=skip_stack.dtype)  # [B, N]
-            
-            # Skip features에 가중치 적용 (공간 정보 유지)
-            weighted_skip = (weights.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1) * skip_stack).sum(dim=1)  # [B, C, H, W]
-            
-            # Apply shared SS2D to weighted skip features (공간 정보 활용)
-            weighted_skip_spatial = weighted_skip.permute(0, 2, 3, 1)  # [B, H, W, C]
-            skip_ss2d_output, _ = self.skip_ss2d(weighted_skip_spatial)  # [B, H, W, C]
-            
-            # Convert back to vector format
-            skip_ss2d_output = skip_ss2d_output.permute(0, 3, 1, 2)  # [B, C, H, W]
-            skip_ss2d_output = F.adaptive_avg_pool2d(skip_ss2d_output, (1, 1)).view(B, -1)  # [B, C]
-            
-            # 최종 출력: MoE + SS2D-processed skip connections
-            final_output = moe_output + 0.1 * skip_ss2d_output
-            
-            # 디버깅: 하드코딩된 균등 가중치 출력
-            if hasattr(self, 'logger') and torch.rand(1).item() < 0.01:  # 1% 확률로 로그
-                weight_values = weights[0].detach().cpu().numpy()
-                # Generate dynamic feature names based on actual skip features
-                feature_names = ['layer4']
-                if self.use_multi_scale_skip:
-                    feature_names.extend([f'layer{i+1}' for i in range(len(self.multi_scale_channels))])
-                feature_names = feature_names[:len(skip_features_spatial)]
-                weight_info = ', '.join([f"{name}: {val:.3f}" for name, val in zip(feature_names, weight_values)])
-                self.logger.info(f"Hard-coded uniform weights: {weight_info}")
-        else:
-            final_output = moe_output
         
         # Prepare outputs
         outputs.update({
             'out': final_output,
-            'aux_loss': aux_loss,
+            'aux_loss': moe_aux_loss,
             'main': moe_output,
         })
-
-        if self.use_multi_scale_skip and skip_features_spatial is not None:
-            outputs['skip_features'] = skip_features_spatial
+        
+        if self.use_multi_scale_skip:
+            if 'all_layer_features' in locals():
+                outputs['fused_features'] = x_for_moe
         
         return outputs

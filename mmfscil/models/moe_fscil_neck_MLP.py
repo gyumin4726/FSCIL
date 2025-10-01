@@ -47,8 +47,6 @@ class FSCILGate(nn.Module):
                  dim,
                  num_experts: int,
                  top_k: int = 1,
-                 capacity_factor: float = 1.25,
-                 epsilon: float = 1e-6,
                  use_aux_loss: bool = True,
                  aux_loss_weight: float = 0.01,
                  num_heads: int = 8):
@@ -56,8 +54,6 @@ class FSCILGate(nn.Module):
         self.dim = dim
         self.num_experts = num_experts
         self.top_k = top_k
-        self.capacity_factor = capacity_factor
-        self.epsilon = epsilon
         self.use_aux_loss = use_aux_loss
         self.aux_loss_weight = aux_loss_weight
         self.num_heads = num_heads
@@ -130,17 +126,15 @@ class FSCILGate(nn.Module):
         # Cross-attention 결과만 사용
         raw_gate_scores = F.softmax(spatial_expert_scores, dim=-1)  # [B, num_experts]
         
-        # Step 7: Top-k selection and capacity constraints
-        capacity = int(self.capacity_factor * B)
+        # Step 7: Top-k selection (no capacity constraints - batch-level routing)
         top_k_scores, top_k_indices = raw_gate_scores.topk(self.top_k, dim=-1)  # [B, top_k]
         
         # Create sparsity mask
         mask = torch.zeros_like(raw_gate_scores).scatter_(1, top_k_indices, 1)
         masked_gate_scores = raw_gate_scores * mask
         
-        # Normalize gate scores for dispatch
-        denominators = masked_gate_scores.sum(0, keepdim=True) + self.epsilon
-        gate_scores = (masked_gate_scores / denominators) * capacity 
+        # Normalize gate scores
+        gate_scores = masked_gate_scores 
         
         # Step 8: Compute auxiliary loss for load balancing
         aux_loss = None
@@ -162,25 +156,20 @@ class MLPExpert(nn.Module):
     def __init__(self,
                  dim,
                  expert_id=0,
-                 hidden_dim=None,
-                 dropout=0.1):
+                 hidden_dim=None):
         super().__init__()
         self.dim = dim
         self.expert_id = expert_id
         
         if hidden_dim is None:
-            hidden_dim = dim * 4  # Standard FFN expansion ratio
+            hidden_dim = dim * 4  # Standard FFN expansion ratio (same as MoE Official)
         
-        # 2-layer FFN
-        self.ffn = nn.Sequential(
-            nn.Linear(dim, hidden_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, dim),
-            nn.Dropout(dropout)
-        )
+        # 2-layer FFN (exact same structure as MoE Official)
+        # Layer 1: input_dim → hidden_dim + ReLU
+        self.wi = nn.Linear(dim, hidden_dim, bias=False)
+        # Layer 2: hidden_dim → output_dim (no activation)
+        self.wo = nn.Linear(hidden_dim, dim, bias=False)
         
-        self.norm = nn.LayerNorm(dim)
         self.avg_pool = nn.AdaptiveAvgPool2d((1, 1))
         
     def forward(self, x):
@@ -190,11 +179,11 @@ class MLPExpert(nn.Module):
         x_pooled = x.permute(0, 3, 1, 2)  # [B, dim, H, W]
         x_pooled = self.avg_pool(x_pooled).view(B, -1)  # [B, dim]
         
-        # Apply 2-layer FFN
-        x_expert = self.ffn(x_pooled)  # [B, dim]
-        
-        # Apply normalization
-        output = self.norm(x_expert)
+        # Apply 2-layer FFN (exact same as MoE Official)
+        # Step 1: input → hidden + ReLU
+        hidden = F.relu(self.wi(x_pooled))  # [B, hidden_dim]
+        # Step 2: hidden → output (no activation, no normalization)
+        output = self.wo(hidden)  # [B, dim]
         
         return output
 
@@ -206,9 +195,7 @@ class MoEFSCIL(nn.Module):
                  num_experts=4,
                  top_k=2,
                  feat_size=7,
-                 capacity_factor=1.25,
                  hidden_dim=None,
-                 dropout=0.1,
                  use_aux_loss=True,
                  aux_loss_weight=0.01,
                  num_heads=8):
@@ -221,7 +208,6 @@ class MoEFSCIL(nn.Module):
             dim=dim,
             num_experts=num_experts,
             top_k=top_k,
-            capacity_factor=capacity_factor,
             use_aux_loss=use_aux_loss,
             aux_loss_weight=aux_loss_weight,
             num_heads=num_heads
@@ -231,8 +217,7 @@ class MoEFSCIL(nn.Module):
             MLPExpert(
                 dim=dim,
                 expert_id=i,
-                hidden_dim=hidden_dim,
-                dropout=dropout
+                hidden_dim=hidden_dim
             )
             for i in range(num_experts)
         ])
@@ -305,7 +290,6 @@ class MoEFSCILNeckMLP(BaseModule):
                  num_experts=4,
                  top_k=2,
                  hidden_dim=None,
-                 dropout=0.1,
                  feat_size=2,
                  use_multi_scale_skip=False,
                  multi_scale_channels=[128, 256, 512],
@@ -331,7 +315,7 @@ class MoEFSCILNeckMLP(BaseModule):
         if self.use_multi_scale_skip:
             self.logger.info(f"Enhanced MoE with Multi-Scale Skip Connections: {len(self.multi_scale_channels)} layers")
             self.logger.info(f"Multi-Scale Adapters: {self.multi_scale_channels} → {out_channels} channels")
-            self.logger.info(f"Using 2-layer FFN experts instead of SS2D")
+            self.logger.info(f"Using 2-layer FFN experts (MoE Official style) instead of SS2D")
         
         self.avg = nn.AdaptiveAvgPool2d((1, 1))
 
@@ -357,7 +341,6 @@ class MoEFSCILNeckMLP(BaseModule):
             top_k=top_k,
             feat_size=feat_size,
             hidden_dim=hidden_dim,
-            dropout=dropout,
             use_aux_loss=use_aux_loss,
             aux_loss_weight=aux_loss_weight,
             num_heads=num_heads
