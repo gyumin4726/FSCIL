@@ -220,7 +220,8 @@ class FSCILGate(nn.Module):
             importance = raw_gate_scores.mean(0)     # [num_experts]
             
             # load: 실제 top-k dispatch 결과 (hard routing 분포)
-            load = mask.float().mean(0)              # [num_experts]
+            # Normalize by top_k to maintain consistent loss scale
+            load = (mask / self.top_k).float().mean(0)  # [num_experts]
             
             # Official Switch Transformer load balancing loss
             aux_loss = self.aux_loss_weight * (importance * load).mean() * (self.num_experts ** 2)
