@@ -4,33 +4,35 @@ _base_ = [
     '../_base_/schedules/mini_imagenet_500e.py', '../_base_/default_runtime.py'
 ]
 
-# model settings
 model = dict(backbone=dict(type='VMambaBackbone',
-                           model_name='vmamba_base_s2l15',  # 모델 변경
+                           model_name='vmamba_base_s2l15',
                            pretrained_path='./vssm_base_0229_ckpt_epoch_237.pth',
-                           out_indices=(0, 1, 2, 3),  # Extract features from all 4 stages
-                           frozen_stages=0,  # Freeze patch embedding and first stage
+                           #model_name='vmamba_tiny_s1l8', 
+                           #pretrained_path='./vssm1_tiny_0230s_ckpt_epoch_264.pth',
+                           #model_name='vmamba_small_s2l15', 
+                           #pretrained_path='./vssm_small_0229_ckpt_epoch_222.pth',                           
+                           out_indices=(0, 1, 2, 3),
+                           frozen_stages=0,
                            channel_first=True),
              neck=dict(type='MoEFSCILNeck',
-                       in_channels=1024,  # VMamba base stage4 output channels
+                       num_experts=4,
+                       top_k=2,
+                       in_channels=1024,
                        out_channels=1024,
-                       feat_size=3,  # 224 / (4*8) = 7 (patch_size=4, 4 downsample stages with 2x each)
-                       num_layers=2,
-                       # MoE-specific parameters
-                       num_experts=4,  # Number of lightweight MLP experts
-                       top_k=1,  # Activate 1 expert per sample (data efficiency)
-                       d_state=256,  # SS2D hidden state dimension
-                       dt_rank=256,  # SS2D delta rank
-                       ssm_expand_ratio=1.0,  # SS2D expansion ratio
-                       use_aux_loss=True,
-                       aux_loss_weight=0.01,  # Load balancing loss weight
-                       # Enhanced skip connection settings (MASC-M) for VMamba features
+                       feat_size=3,
                        use_multi_scale_skip=False,
-                       multi_scale_channels=[128, 256, 512]),
+                       multi_scale_channels=[128, 256, 512],
+                       d_state=16,
+                       dt_rank=64,
+                       ssm_expand_ratio=1.0,
+                       num_heads=8,
+                       use_aux_loss=False,
+                       aux_loss_weight=0.01),
              head=dict(type='ETFHead',
                        in_channels=1024,
                        with_len=True,
-                       loss=dict(type='CombinedLoss', dr_weight=0.0, ce_weight=1.0)),
+                       cal_acc=True,
+                       loss=dict(type='CombinedLoss', dr_weight=1.0, ce_weight=0.0)),
              mixup=0,
              mixup_prob=0)
 
@@ -41,11 +43,18 @@ optimizer = dict(
     weight_decay=0.0005,
     paramwise_cfg=dict(
         custom_keys={
+            # 기본 컴포넌트들
             'backbone': dict(lr_mult=0.1),
-            'neck.mlp_proj': dict(lr_mult=1.2),
             'neck.pos_embed': dict(lr_mult=10.0),
+            
+            # MoE 컴포넌트들
             'neck.moe.gate': dict(lr_mult=10.0),     
             'neck.moe.experts': dict(lr_mult=10.0),
+            
+            # Multi-Scale 관련 (use_multi_scale_skip=True일 때만 사용됨)
+            'neck.multi_scale_adapters': dict(lr_mult=1.0),
+            'neck.multi_scale_router.spatial_self_attention': dict(lr_mult=1.0),
+            'neck.multi_scale_router.aux_layer_cross_attention': dict(lr_mult=1.0),
         }
     ))
 

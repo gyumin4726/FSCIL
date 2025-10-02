@@ -8,8 +8,12 @@ inc_end = 200
 inc_step = 10
 
 model = dict(backbone=dict(type='VMambaBackbone',
-                           model_name='vmamba_base_s2l15', 
+                           model_name='vmamba_base_s2l15',
                            pretrained_path='./vssm_base_0229_ckpt_epoch_237.pth',
+                           #model_name='vmamba_tiny_s1l8', 
+                           #pretrained_path='./vssm1_tiny_0230s_ckpt_epoch_264.pth',
+                           #model_name='vmamba_small_s2l15', 
+                           #pretrained_path='./vssm_small_0229_ckpt_epoch_222.pth',
                            out_indices=(0, 1, 2, 3), 
                            frozen_stages=0, 
                            channel_first=True),
@@ -44,20 +48,18 @@ optimizer = dict(
     weight_decay=0.0005,
     paramwise_cfg=dict(
         custom_keys={
-            # 기본 MoE 컴포넌트들
+            # 기본 컴포넌트들
             'backbone': dict(lr_mult=0.1),
-            'neck.moe.gate': dict(lr_mult=1.5),     
-            'neck.moe.experts': dict(lr_mult=5.0),
-            'neck.mlp_proj': dict(lr_mult=1.1),
             'neck.pos_embed': dict(lr_mult=1.0),
             
-            # MASC (Multi-Scale Attention Skip Connection) 관련 컴포넌트들
-            'neck.cross_attention': dict(lr_mult=1.0),        # 크로스 어텐션 메커니즘
-            'neck.query_proj': dict(lr_mult=1.0),            # 쿼리 프로젝션
-            'neck.key_proj': dict(lr_mult=1.0),              # 키 프로젝션
-            'neck.value_proj': dict(lr_mult=1.0),            # 밸류 프로젝션
-            'neck.skip_ss2d': dict(lr_mult=1.0),             # 스킵 연결용 SS2D 블록
-            'neck.multi_scale_adapters': dict(lr_mult=1.0),  # 멀티스케일 어댑터들
+            # MoE 컴포넌트들
+            'neck.moe.gate': dict(lr_mult=1.5),     
+            'neck.moe.experts': dict(lr_mult=5.0),
+            
+            # Multi-Scale 관련 (use_multi_scale_skip=True일 때만 사용됨)
+            'neck.multi_scale_adapters': dict(lr_mult=1.0),
+            'neck.multi_scale_router.spatial_self_attention': dict(lr_mult=1.0),
+            'neck.multi_scale_router.aux_layer_cross_attention': dict(lr_mult=1.0),
         }
     ))
 

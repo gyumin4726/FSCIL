@@ -10,6 +10,10 @@ inc_step = 10
 model = dict(backbone=dict(type='VMambaBackbone',
                            model_name='vmamba_base_s2l15',
                            pretrained_path='./vssm_base_0229_ckpt_epoch_237.pth',
+                           #model_name='vmamba_tiny_s1l8', 
+                           #pretrained_path='./vssm1_tiny_0230s_ckpt_epoch_264.pth',
+                           #model_name='vmamba_small_s2l15', 
+                           #pretrained_path='./vssm_small_0229_ckpt_epoch_222.pth',
                            out_indices=(0, 1, 2, 3),
                            frozen_stages=0,
                            channel_first=True),
@@ -46,9 +50,10 @@ optimizer = dict(type='SGD',
                  weight_decay=0.0005,
                  paramwise_cfg=dict(
                      custom_keys={
-                         # 기본 MoE 컴포넌트들
-                         'neck.mlp_proj': dict(lr_mult=0.8),
+                         # 기본 컴포넌트들
                          'neck.pos_embed': dict(lr_mult=0.8),
+                         
+                         # MoE 컴포넌트들
                          'neck.moe.gate': dict(lr_mult=0.8),     
                          'neck.moe.experts': dict(lr_mult=0.8),
                      }))
