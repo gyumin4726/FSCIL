@@ -1,5 +1,5 @@
-img_size = 32
-_img_resize_size = 36
+img_size = 84
+_img_resize_size = 96
 img_norm_cfg = dict(mean=[129.304, 124.070, 112.434],
                     std=[68.170, 65.392, 70.418],
                     to_rgb=False)
@@ -7,10 +7,8 @@ meta_keys = ('filename', 'ori_filename', 'ori_shape', 'img_shape', 'flip',
              'flip_direction', 'img_norm_cfg', 'cls_id', 'img_id')
 
 train_pipeline = [
-    dict(type='RandomResizedCrop',
-         size=img_size,
-         scale=(0.6, 1.),
-         interpolation='bicubic'),
+    dict(type='Resize', size=(_img_resize_size, _img_resize_size)),
+    dict(type='CenterCrop', crop_size=img_size),
     dict(type='Normalize', **img_norm_cfg),
     dict(type='ImageToTensor', keys=['img']),
     dict(type='ToTensor', keys=['gt_label']),
@@ -18,14 +16,14 @@ train_pipeline = [
 ]
 
 test_pipeline = [
-    dict(type='Resize', size=(_img_resize_size, -1), interpolation='bicubic'),
+    dict(type='Resize', size=(_img_resize_size, _img_resize_size)),
     dict(type='CenterCrop', crop_size=img_size),
     dict(type='Normalize', **img_norm_cfg),
     dict(type='ImageToTensor', keys=['img']),
     dict(type='Collect', keys=['img', 'gt_label'], meta_keys=meta_keys)
 ]
 
-data = dict(samples_per_gpu=64,
+data = dict(samples_per_gpu=128,
             workers_per_gpu=1,
             train_dataloader=dict(persistent_workers=True, ),
             val_dataloader=dict(persistent_workers=True, ),

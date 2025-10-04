@@ -375,15 +375,11 @@ class MoEFSCILNeck(BaseModule):
                  out_channels=512,
                  num_experts=4,
                  top_k=2,
-                 d_state=16,
-                 dt_rank=64,
-                 ssm_expand_ratio=1.0,
-                 feat_size=2,
+                 feat_size=3,
                  use_multi_scale_skip=False,
                  multi_scale_channels=[128, 256, 512],
                  use_aux_loss=True,
-                 aux_loss_weight=0.01,
-                 num_heads=8):
+                 aux_loss_weight=0.01):
         super(MoEFSCILNeck, self).__init__(init_cfg=None)
         
         self.in_channels = in_channels
@@ -429,7 +425,7 @@ class MoEFSCILNeck(BaseModule):
             self.multi_scale_router = MultiScaleRouter(
                 dim=out_channels,
                 num_aux_layers=len(self.multi_scale_channels),  # [layer1, layer2, layer3] only
-                num_heads=num_heads
+                num_heads=8
             )
 
         self.moe = MoEFSCIL(
@@ -437,12 +433,12 @@ class MoEFSCILNeck(BaseModule):
             num_experts=num_experts,
             top_k=top_k,
             feat_size=feat_size,
-            d_state=d_state,
-            dt_rank=dt_rank if dt_rank is not None else d_state,
-            ssm_expand_ratio=ssm_expand_ratio,
+            d_state=1,
+            dt_rank=4,
+            ssm_expand_ratio=1.0,
             use_aux_loss=use_aux_loss,
             aux_loss_weight=aux_loss_weight,
-            num_heads=num_heads
+            num_heads=8
         )
 
         self.moe.debug_enabled = True

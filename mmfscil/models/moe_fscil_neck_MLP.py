@@ -295,8 +295,7 @@ class MoEFSCILNeckMLP(BaseModule):
                  use_multi_scale_skip=False,
                  multi_scale_channels=[128, 256, 512],
                  use_aux_loss=True,
-                 aux_loss_weight=0.01,
-                 num_heads=8):
+                 aux_loss_weight=0.01):
         super(MoEFSCILNeckMLP, self).__init__(init_cfg=None)
         
         self.in_channels = in_channels
@@ -344,7 +343,7 @@ class MoEFSCILNeckMLP(BaseModule):
             hidden_dim=hidden_dim,
             use_aux_loss=use_aux_loss,
             aux_loss_weight=aux_loss_weight,
-            num_heads=num_heads
+            num_heads=8
         )
 
         self.moe.debug_enabled = True
