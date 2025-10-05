@@ -1,6 +1,6 @@
 _base_ = [
     '../_base_/models/vmamba_etf.py', '../_base_/datasets/cifar_fscil.py',
-    '../_base_/schedules/cifar_200e.py', '../_base_/default_runtime.py'
+    '../_base_/schedules/cifar_10e.py', '../_base_/default_runtime.py'
 ]
 
 inc_start = 60

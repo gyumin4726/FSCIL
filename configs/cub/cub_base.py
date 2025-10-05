@@ -1,6 +1,6 @@
 _base_ = [
     '../_base_/models/vmamba_etf.py', '../_base_/datasets/cub_fscil.py',
-    '../_base_/schedules/cub_80e.py', '../_base_/default_runtime.py'
+    '../_base_/schedules/cub_20e.py', '../_base_/default_runtime.py'
 ]
 
 inc_start = 100
