@@ -235,8 +235,8 @@ class SS2DExpert(nn.Module):
     def __init__(self,
                  dim,
                  expert_id=0,
-                 d_state=16,
-                 dt_rank=64,
+                 d_state=1,
+                 dt_rank=4,
                  ssm_expand_ratio=1.0):
         super().__init__()
         self.dim = dim
@@ -277,8 +277,8 @@ class MoEFSCIL(nn.Module):
                  num_experts=4,
                  top_k=2,
                  feat_size=7,
-                 d_state=16,
-                 dt_rank=64,
+                 d_state=1,
+                 dt_rank=4,
                  ssm_expand_ratio=1.0,
                  use_aux_loss=True,
                  aux_loss_weight=0.01,
