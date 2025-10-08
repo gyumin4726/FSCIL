@@ -14,8 +14,6 @@ model = dict(
         in_channels=1024,
         out_channels=1024,
         feat_size=7,
-        use_multi_scale_skip=False,
-        multi_scale_channels=[128, 256, 512],
     ),
     head=dict(
         type='ETFHead',

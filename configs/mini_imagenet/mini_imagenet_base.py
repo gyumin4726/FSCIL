@@ -15,15 +15,14 @@ model = dict(backbone=dict(type='VMambaBackbone',
                            frozen_stages=0,
                            channel_first=True),
              neck=dict(type='MoEFSCILNeck',
-                       num_experts=4,
-                       top_k=2,
-                       in_channels=1024,
-                       out_channels=1024,
-                       feat_size=3,
-                       use_multi_scale_skip=False,
-                       multi_scale_channels=[128, 256, 512],
-                       use_aux_loss=False,
-                       aux_loss_weight=0.01),
+                      num_experts=4,
+                      top_k=2,
+                      eval_top_k=1,
+                      in_channels=1024,
+                      out_channels=1024,
+                      feat_size=3,
+                      use_aux_loss=False,
+                      aux_loss_weight=0.01),
              head=dict(type='ETFHead',
                        in_channels=1024,
                        with_len=True,
@@ -46,11 +45,6 @@ optimizer = dict(
             # MoE 컴포넌트들
             'neck.moe.gate': dict(lr_mult=10.0),     
             'neck.moe.experts': dict(lr_mult=10.0),
-            
-            # Multi-Scale 관련 (use_multi_scale_skip=True일 때만 사용됨)
-            'neck.multi_scale_adapters': dict(lr_mult=1.0),
-            'neck.multi_scale_router.spatial_self_attention': dict(lr_mult=1.0),
-            'neck.multi_scale_router.aux_layer_cross_attention': dict(lr_mult=1.0),
         }
     ))
 

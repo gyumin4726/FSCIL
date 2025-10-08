@@ -18,13 +18,14 @@ model = dict(backbone=dict(type='VMambaBackbone',
                            frozen_stages=0,
                            channel_first=True),
              neck=dict(type='MoEFSCILNeck',
-                       num_experts=4,
-                       top_k=4,
-                       in_channels=1024,
-                       out_channels=1024,
-                       feat_size=7,
-                       use_aux_loss=False,
-                       aux_loss_weight=0.01),
+                      num_experts=4,
+                      top_k=4,
+                      eval_top_k=4,
+                      in_channels=1024,
+                      out_channels=1024,
+                      feat_size=7,
+                      use_aux_loss=False,
+                      aux_loss_weight=0.01),
              head=dict(type='ETFHead',
                        in_channels=1024,
                        num_classes=200,
@@ -34,8 +35,8 @@ model = dict(backbone=dict(type='VMambaBackbone',
              mixup=0.5,
              mixup_prob=0.5)
 
-base_copy_list = (1, 1, 2, 2, 3, 3, 1, 1, 1, 1)
-copy_list = (10, 10, 10, 10, 10, 10, 10, 10, 10, 10)
+base_copy_list = (1, 1, 2, 2, 3, 3, 2, 2, 1, 1)
+copy_list = (1, 1, 1, 1, 1, 1, 1, 1, 1, 1)
 step_list = (200, 210, 220, 230, 240, 250, 260, 270, 280, 290)
 finetune_lr = 0.05
 
