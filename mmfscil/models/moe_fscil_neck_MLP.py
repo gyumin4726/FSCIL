@@ -47,6 +47,7 @@ class FSCILGate(nn.Module):
                  dim,
                  num_experts: int,
                  top_k: int = 1,
+                 eval_top_k: int = None,
                  use_aux_loss: bool = True,
                  aux_loss_weight: float = 0.01,
                  num_heads: int = 8):
@@ -54,6 +55,7 @@ class FSCILGate(nn.Module):
         self.dim = dim
         self.num_experts = num_experts
         self.top_k = top_k
+        self.eval_top_k = eval_top_k if eval_top_k is not None else top_k
         self.use_aux_loss = use_aux_loss
         self.aux_loss_weight = aux_loss_weight
         self.num_heads = num_heads
@@ -126,8 +128,9 @@ class FSCILGate(nn.Module):
         # Cross-attention 결과만 사용
         raw_gate_scores = F.softmax(spatial_expert_scores, dim=-1)  # [B, num_experts]
         
-        # Step 7: Top-k selection (no capacity constraints - batch-level routing)
-        top_k_scores, top_k_indices = raw_gate_scores.topk(self.top_k, dim=-1)  # [B, top_k]
+        # Step 7: Top-k selection (학습/평가 모드에 따라 다른 top_k 사용)
+        current_top_k = self.top_k if self.training else self.eval_top_k
+        top_k_scores, top_k_indices = raw_gate_scores.topk(current_top_k, dim=-1)  # [B, top_k]
         
         # Create sparsity mask
         mask = torch.zeros_like(raw_gate_scores).scatter_(1, top_k_indices, 1)
@@ -144,7 +147,7 @@ class FSCILGate(nn.Module):
             
             # load: 실제 top-k dispatch 결과 (hard routing 분포)
             # Normalize by top_k to maintain consistent loss scale
-            load = (mask / self.top_k).float().mean(0)  # [num_experts]
+            load = (mask / current_top_k).float().mean(0)  # [num_experts]
             
             # Official Switch Transformer load balancing loss
             aux_loss = self.aux_loss_weight * (importance * load).mean() * (self.num_experts ** 2)
@@ -195,6 +198,7 @@ class MoEFSCIL(nn.Module):
                  dim,
                  num_experts=4,
                  top_k=2,
+                 eval_top_k=None,
                  feat_size=7,
                  hidden_dim=None,
                  use_aux_loss=True,
@@ -204,11 +208,13 @@ class MoEFSCIL(nn.Module):
         self.dim = dim
         self.num_experts = num_experts
         self.top_k = top_k
+        self.eval_top_k = eval_top_k if eval_top_k is not None else top_k
 
         self.gate = FSCILGate(
             dim=dim,
             num_experts=num_experts,
             top_k=top_k,
+            eval_top_k=self.eval_top_k,
             use_aux_loss=use_aux_loss,
             aux_loss_weight=aux_loss_weight,
             num_heads=num_heads
@@ -230,8 +236,9 @@ class MoEFSCIL(nn.Module):
         # Pass spatial information directly to gate for spatial-aware routing
         gate_scores, aux_loss = self.gate(x)  # [B, num_experts] - x is [B, H, W, dim]
         
-        # Find top-k experts for each token (efficient sparse routing)
-        top_k_scores, top_k_indices = gate_scores.topk(self.top_k, dim=-1)  # [B, top_k]
+        # Find top-k experts for each token (학습/평가 모드에 따라 다른 top_k 사용)
+        current_top_k = self.top_k if self.training else self.eval_top_k
+        top_k_scores, top_k_indices = gate_scores.topk(current_top_k, dim=-1)  # [B, top_k]
         
         # 가중치 정규화: 선택된 experts의 가중치 합이 1이 되도록
         top_k_scores = F.softmax(top_k_scores, dim=-1)  # [B, top_k]
@@ -271,7 +278,7 @@ class MoEFSCIL(nn.Module):
         
         # Process only selected experts (sparse activation)
         for i in range(B):  # For each sample in batch
-            for k in range(self.top_k):  # For each selected expert
+            for k in range(current_top_k):  # For each selected expert
                 expert_idx = top_k_indices[i, k].item()
                 expert_weight = top_k_scores[i, k]
                 
@@ -290,6 +297,7 @@ class MoEFSCILNeckMLP(BaseModule):
                  out_channels=512,
                  num_experts=4,
                  top_k=2,
+                 eval_top_k=None,
                  hidden_dim=None,
                  feat_size=2,
                  use_multi_scale_skip=False,
@@ -302,6 +310,7 @@ class MoEFSCILNeckMLP(BaseModule):
         self.out_channels = out_channels
         self.num_experts = num_experts
         self.top_k = top_k
+        self.eval_top_k = eval_top_k if eval_top_k is not None else top_k
         self.feat_size = feat_size
 
         self.use_multi_scale_skip = use_multi_scale_skip
@@ -310,7 +319,7 @@ class MoEFSCILNeckMLP(BaseModule):
 
         
         self.logger = get_root_logger()
-        self.logger.info(f"MoE-FSCIL Neck (MLP) initialized: {num_experts} experts, top-{top_k} activation")
+        self.logger.info(f"MoE-FSCIL Neck (MLP) initialized: {num_experts} experts, top-{top_k} activation (train), top-{self.eval_top_k} activation (eval)")
         
         if self.use_multi_scale_skip:
             self.logger.info(f"Enhanced MoE with Multi-Scale Skip Connections: {len(self.multi_scale_channels)} layers")
@@ -339,6 +348,7 @@ class MoEFSCILNeckMLP(BaseModule):
             dim=out_channels,
             num_experts=num_experts,
             top_k=top_k,
+            eval_top_k=self.eval_top_k,
             feat_size=feat_size,
             hidden_dim=hidden_dim,
             use_aux_loss=use_aux_loss,

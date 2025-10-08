@@ -97,8 +97,26 @@ def analyze_components_flops(model, input_shape: Tuple[int, ...] = (3, 224, 224)
             print(f"  🔢 파라미터:    {format_number(actual_params):>12}")
             total_params += actual_params
         
-        # Backbone 출력 크기 추정 (일반적으로 7x7 feature map)
-        backbone_output_shape = (1024, 7, 7)  # VMamba base의 일반적인 출력
+        # Backbone 출력 크기 자동 감지
+        try:
+            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            with torch.no_grad():
+                dummy_input = torch.randn(1, *input_shape).to(device)
+                model.backbone.eval()
+                backbone_out = model.backbone(dummy_input)
+                if isinstance(backbone_out, tuple):
+                    backbone_out = backbone_out[-1]  # 마지막 feature map 사용
+                _, C, H, W = backbone_out.shape
+                backbone_output_shape = (C, H, W)
+                print(f"  ✅ Backbone 출력 크기: {backbone_output_shape}")
+        except Exception as e:
+            # 실패하면 neck의 in_channels 사용
+            if hasattr(model.neck, 'in_channels'):
+                backbone_output_shape = (model.neck.in_channels, 7, 7)
+                print(f"  💡 Neck의 in_channels로부터 추정: {backbone_output_shape}")
+            else:
+                backbone_output_shape = (1024, 7, 7)  # 기본값
+                print(f"  ⚠️ 기본값 사용: {backbone_output_shape}")
     
     # Neck 분석
     if hasattr(model, 'neck') and model.neck is not None:
@@ -129,7 +147,14 @@ def analyze_components_flops(model, input_shape: Tuple[int, ...] = (3, 224, 224)
         print("-" * 40)
         try:
             # Head는 neck의 출력을 입력으로 받음 (일반적으로 1D feature)
-            head_input_shape = (1024,)  # Neck 출력 차원
+            # neck의 out_channels 또는 head의 in_channels 사용
+            if hasattr(model.neck, 'out_channels'):
+                head_input_dim = model.neck.out_channels
+            elif hasattr(model.head, 'in_channels'):
+                head_input_dim = model.head.in_channels
+            else:
+                head_input_dim = 1024  # 기본값
+            head_input_shape = (head_input_dim,)  # Neck 출력 차원
             head_flops, thop_params = try_thop_flops_component(model.head, head_input_shape, "Head")
             # 실제 파라미터 수는 직접 계산 (thop이 놓칠 수 있음)
             actual_params = sum(p.numel() for p in model.head.parameters())
