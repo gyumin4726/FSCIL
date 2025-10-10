@@ -16,6 +16,11 @@ from .ss2d import SS2D
 
 
 class FSCILGate(nn.Module):
+    """Simplified MoE Gate inspired by official MoE implementation.
+    
+    Uses simple linear projection instead of attention mechanisms,
+    while maintaining flexible top-k routing and Switch Transformer load balancing.
+    """
     def __init__(self,
                  dim,
                  num_experts: int,
@@ -23,7 +28,7 @@ class FSCILGate(nn.Module):
                  eval_top_k: int = None,
                  use_aux_loss: bool = True,
                  aux_loss_weight: float = 0.01,
-                 num_heads: int = 8):
+                 num_heads: int = 8):  # Kept for compatibility, not used
         super().__init__()
         self.dim = dim
         self.num_experts = num_experts
@@ -31,37 +36,19 @@ class FSCILGate(nn.Module):
         self.eval_top_k = eval_top_k if eval_top_k is not None else top_k
         self.use_aux_loss = use_aux_loss
         self.aux_loss_weight = aux_loss_weight
-        self.num_heads = num_heads
         
-        # Self-attention for spatial context learning (Query 생성용)
-        self.spatial_self_attention = nn.MultiheadAttention(
-            embed_dim=dim,
-            num_heads=num_heads,
-            dropout=0.1,
-            batch_first=True
-        )
+        # Simple linear projection for routing (official MoE style)
+        # Parameters: dim * num_experts (~4K for dim=1024, num_experts=4)
+        self.gate = nn.Linear(dim, num_experts, bias=False)
         
-        # Cross-attention for expert routing
-        self.expert_cross_attention = nn.MultiheadAttention(
-            embed_dim=dim,
-            num_heads=num_heads,
-            dropout=0.1,
-            batch_first=True
-        )
-        
-        # Expert query embeddings for spatial routing
-        self.expert_queries = nn.Parameter(torch.randn(num_experts, dim))
-        nn.init.xavier_uniform_(self.expert_queries)
-        
-        # Spatial gating projection
-        self.gate_proj = nn.Linear(dim, num_experts)
+        # Initialize with small values for stability
+        nn.init.normal_(self.gate.weight, mean=0.0, std=0.01)
 
         
     def forward(self, x: torch.Tensor):
         """
-        Self-attention + Cross-attention based gating
-        - Self-attention으로 spatial context 학습
-        - Cross-attention으로 expert routing
+        Simplified linear projection based gating (official MoE style).
+        Maintains flexible top-k routing and Switch Transformer load balancing.
         
         Args:
             x: Input spatial features [B, H, W, dim]
@@ -72,49 +59,31 @@ class FSCILGate(nn.Module):
         """
         B, H, W, dim = x.shape
         
-        # Step 1: Convert to sequence format
-        x_spatial = x.view(B, H * W, dim)  # [B, H*W, dim]
+        # Step 1: Spatial pooling (aggregate spatial information)
+        # [B, H, W, dim] -> [B, dim]
+        x_pooled = x.mean(dim=[1, 2])  # Global average pooling
         
-        # Step 2: Self-attention for spatial context learning (Query 생성)
-        contextualized_features, _ = self.spatial_self_attention(
-            query=x_spatial,    # [B, H*W, dim]
-            key=x_spatial,      # [B, H*W, dim] 
-            value=x_spatial     # [B, H*W, dim]
-        )
+        # Step 2: Simple linear projection to expert logits (official MoE style)
+        # [B, dim] -> [B, num_experts]
+        gate_logits = self.gate(x_pooled)
         
-        # Step 3: Expert queries 준비
-        expert_queries = self.expert_queries.unsqueeze(0).expand(B, -1, -1)  # [B, num_experts, dim]
+        # Step 3: Softmax to get routing probabilities
+        raw_gate_scores = F.softmax(gate_logits, dim=-1)  # [B, num_experts]
         
-        # Step 4: Cross-attention for expert routing
-        # Query: contextualized features, Key&Value: expert queries
-        attended_features, attention_weights = self.expert_cross_attention(
-            query=contextualized_features,  # [B, H*W, dim] - self-attention으로 contextualized된 features
-            key=expert_queries,            # [B, num_experts, dim]
-            value=expert_queries           # [B, num_experts, dim]
-        )
-        
-        # Step 5: 공간별 expert 선호도를 global expert 선호도로 집계
-        # attention_weights: [B, H*W, num_experts] - 각 spatial position의 expert 선호도
-        spatial_expert_scores = attention_weights.mean(dim=1)  # [B, num_experts] - 공간 평균
-        
-        # Step 6: 최종 gate scores 생성
-        # Cross-attention 결과만 사용
-        raw_gate_scores = F.softmax(spatial_expert_scores, dim=-1)  # [B, num_experts]
-        
-        # Step 7: Top-k selection (학습/평가 모드에 따라 다른 top_k 사용)
+        # Step 4: Top-k selection (flexible: train vs eval)
         current_top_k = self.top_k if self.training else self.eval_top_k
         top_k_scores, top_k_indices = raw_gate_scores.topk(current_top_k, dim=-1)  # [B, top_k]
         
-        # Create sparsity mask
+        # Step 5: Create sparsity mask
         mask = torch.zeros_like(raw_gate_scores).scatter_(1, top_k_indices, 1)
         masked_gate_scores = raw_gate_scores * mask
         
-        # Normalize gate scores
+        # Step 6: Keep original scores (not normalized within top-k)
         gate_scores = masked_gate_scores 
         
-        # Step 8: Compute auxiliary loss for load balancing
+        # Step 7: Compute auxiliary loss for load balancing (Switch Transformer style)
         aux_loss = None
-        if self.use_aux_loss:
+        if self.use_aux_loss and self.training:
             # importance: 원본 softmax 확률의 평균 (soft routing 기준 기대 분포)
             importance = raw_gate_scores.mean(0)     # [num_experts]
             
@@ -122,7 +91,7 @@ class FSCILGate(nn.Module):
             # Normalize by top_k to maintain consistent loss scale
             load = (mask / current_top_k).float().mean(0)  # [num_experts]
             
-            # Official Switch Transformer load balancing loss
+            # Switch Transformer load balancing loss
             aux_loss = self.aux_loss_weight * (importance * load).mean() * (self.num_experts ** 2)
         
         return gate_scores, aux_loss
