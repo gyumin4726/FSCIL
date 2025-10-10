@@ -17,7 +17,7 @@ model = dict(backbone=dict(type='VMambaBackbone',
              neck=dict(type='MoEFSCILNeck',
                       num_experts=4,
                       top_k=2,
-                      eval_top_k=1,
+                      eval_top_k=2,
                       in_channels=1024,
                       out_channels=1024,
                       feat_size=3,
@@ -40,11 +40,11 @@ optimizer = dict(
         custom_keys={
             # 기본 컴포넌트들
             'backbone': dict(lr_mult=0.1),
-            'neck.pos_embed': dict(lr_mult=10.0),
+            'neck.pos_embed': dict(lr_mult=1.0),
             
             # MoE 컴포넌트들
-            'neck.moe.gate': dict(lr_mult=10.0),     
-            'neck.moe.experts': dict(lr_mult=10.0),
+            'neck.moe.gate': dict(lr_mult=1.0),     
+            'neck.moe.experts': dict(lr_mult=5.0),
         }
     ))
 

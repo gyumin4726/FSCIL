@@ -25,7 +25,7 @@ test_pipeline = [
     dict(type='Collect', keys=['img', 'gt_label'], meta_keys=meta_keys)
 ]
 
-data = dict(samples_per_gpu=64,
+data = dict(samples_per_gpu=128,
             workers_per_gpu=1,
             train_dataloader=dict(persistent_workers=True, ),
             val_dataloader=dict(persistent_workers=True, ),
