@@ -36,7 +36,7 @@ model = dict(backbone=dict(type='VMambaBackbone',
              mixup_prob=0.5)
 
 base_copy_list = (1, 1, 2, 2, 3, 3, 2, 2, 1, 1)
-copy_list = (1, 1, 1, 1, 1, 1, 1, 1, 1, 1)
+copy_list = (10, 10, 10, 10, 10, 10, 10, 10, 10, 10)
 step_list = (200, 210, 220, 230, 240, 250, 260, 270, 280, 290)
 finetune_lr = 0.05
 
