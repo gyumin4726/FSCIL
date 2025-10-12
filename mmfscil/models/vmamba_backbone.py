@@ -193,8 +193,10 @@ class VMambaBackbone(BaseModule):
         """
         features = self.vmamba(x)
         
-        # If only one output index, return as tuple for consistency
+        # If only one output index, extract the tensor from list
         if len(self.out_indices) == 1:
+            if isinstance(features, (list, tuple)):
+                return (features[0],)
             return (features,)
         
         return tuple(features)
