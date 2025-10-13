@@ -595,6 +595,14 @@ def fscil(model,
     session_results.append(result)
     acc_list.append(result['acc'])
     
+    # 첫 번째 세션 결과 즉시 출력
+    logger.info(
+        "[{:02d}]Evaluation results : acc : {:.2f} ; acc_base : {:.2f} ; acc_inc : {:.2f}"
+        .format(result['session'], result['acc'], result['acc_base'], result['acc_inc']))
+    logger.info(
+        "[{:02d}]Evaluation results : acc_incremental_old : {:.2f} ; acc_incremental_new : {:.2f}"
+        .format(result['session'], result['acc_incremental_old'], result['acc_incremental_new']))
+    
     acc_train = test_session(cfg,
                              model_finetune,
                              distributed,
@@ -812,6 +820,14 @@ def fscil(model,
                                    inc_start, save_results=True)
                 session_results.append(result)
                 acc = result['acc']
+                
+                # 각 세션 결과 즉시 출력
+                logger.info(
+                    "[{:02d}]Evaluation results : acc : {:.2f} ; acc_base : {:.2f} ; acc_inc : {:.2f}"
+                    .format(result['session'], result['acc'], result['acc_base'], result['acc_inc']))
+                logger.info(
+                    "[{:02d}]Evaluation results : acc_incremental_old : {:.2f} ; acc_incremental_new : {:.2f}"
+                    .format(result['session'], result['acc_incremental_old'], result['acc_incremental_new']))
                 
                 acc_train = test_session(cfg,
                                          model_finetune,
