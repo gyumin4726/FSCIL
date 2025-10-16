@@ -31,99 +31,59 @@ class FSCILGate(nn.Module):
         self.eval_top_k = eval_top_k if eval_top_k is not None else top_k
         self.use_aux_loss = use_aux_loss
         self.aux_loss_weight = aux_loss_weight
-        self.num_heads = num_heads
         
-        # Self-attention for spatial context learning (Query 생성용)
-        self.spatial_self_attention = nn.MultiheadAttention(
-            embed_dim=dim,
-            num_heads=num_heads,
-            dropout=0.1,
-            batch_first=True
-        )
-        
-        # Cross-attention for expert routing
-        self.expert_cross_attention = nn.MultiheadAttention(
-            embed_dim=dim,
-            num_heads=num_heads,
-            dropout=0.1,
-            batch_first=True
-        )
-        
-        # Expert query embeddings for spatial routing
+        # Expert query embeddings for spatial-wise routing
         self.expert_queries = nn.Parameter(torch.randn(num_experts, dim))
         nn.init.xavier_uniform_(self.expert_queries)
         
-        # Spatial gating projection
-        self.gate_proj = nn.Linear(dim, num_experts)
+        # Temperature for softmax (learnable)
+        self.temperature = nn.Parameter(torch.ones(1))
 
         
     def forward(self, x: torch.Tensor):
         """
-        Self-attention + Cross-attention based gating
-        - Self-attention으로 spatial context 학습
-        - Cross-attention으로 expert routing
+        Spatial-wise routing with dot-product similarity
+        - 각 spatial position마다 expert와의 유사도 계산
+        - Pooling 없이 [B, H, W, num_experts] 출력
         
         Args:
             x: Input spatial features [B, H, W, dim]
             
         Returns:
-            gate_scores: Expert selection scores [B, num_experts]
+            gate_scores: Spatial-wise expert scores [B, H, W, num_experts]
             aux_loss: Load balancing loss
         """
         B, H, W, dim = x.shape
         
-        # Step 1: Convert to sequence format
-        x_spatial = x.view(B, H * W, dim)  # [B, H*W, dim]
+        # Step 1: Compute similarity between each position and expert queries
+        # x: [B, H, W, dim], expert_queries: [num_experts, dim]
+        # Reshape for matrix multiplication
+        x_flat = x.reshape(B * H * W, dim)  # [B*H*W, dim]
         
-        # Step 2: Self-attention for spatial context learning (Query 생성)
-        contextualized_features, _ = self.spatial_self_attention(
-            query=x_spatial,    # [B, H*W, dim]
-            key=x_spatial,      # [B, H*W, dim] 
-            value=x_spatial     # [B, H*W, dim]
-        )
+        # Dot product similarity (scaled)
+        logits = x_flat @ self.expert_queries.T / self.temperature  # [B*H*W, num_experts]
         
-        # Step 3: Expert queries 준비
-        expert_queries = self.expert_queries.unsqueeze(0).expand(B, -1, -1)  # [B, num_experts, dim]
+        # Reshape back to spatial
+        logits = logits.reshape(B, H, W, self.num_experts)  # [B, H, W, num_experts]
         
-        # Step 4: Cross-attention for expert routing
-        # Query: contextualized features, Key&Value: expert queries
-        attended_features, attention_weights = self.expert_cross_attention(
-            query=contextualized_features,  # [B, H*W, dim] - self-attention으로 contextualized된 features
-            key=expert_queries,            # [B, num_experts, dim]
-            value=expert_queries           # [B, num_experts, dim]
-        )
+        # Step 2: Softmax over experts (각 position에서 expert 간 확률 분포)
+        gate_scores = F.softmax(logits, dim=-1)  # [B, H, W, num_experts]
         
-        # Step 5: 공간별 expert 선호도를 global expert 선호도로 집계
-        # attention_weights: [B, H*W, num_experts] - 각 spatial position의 expert 선호도
-        spatial_expert_scores = attention_weights.mean(dim=1)  # [B, num_experts] - 공간 평균
-        
-        # Step 6: 최종 gate scores 생성
-        # Cross-attention 결과만 사용
-        raw_gate_scores = F.softmax(spatial_expert_scores, dim=-1)  # [B, num_experts]
-        
-        # Step 7: Top-k selection (학습/평가 모드에 따라 다른 top_k 사용)
-        current_top_k = self.top_k if self.training else self.eval_top_k
-        top_k_scores, top_k_indices = raw_gate_scores.topk(current_top_k, dim=-1)  # [B, top_k]
-        
-        # Create sparsity mask
-        mask = torch.zeros_like(raw_gate_scores).scatter_(1, top_k_indices, 1)
-        masked_gate_scores = raw_gate_scores * mask
-        
-        # Normalize gate scores
-        gate_scores = masked_gate_scores 
-        
-        # Step 8: Compute auxiliary loss for load balancing
+        # Step 3: Compute auxiliary loss for load balancing
         aux_loss = None
         if self.use_aux_loss:
-            # importance: 원본 softmax 확률의 평균 (soft routing 기준 기대 분포)
-            importance = raw_gate_scores.mean(0)     # [num_experts]
+            # Global average of gate scores across batch and spatial dimensions
+            avg_gate_scores = gate_scores.mean(dim=[0, 1, 2])  # [num_experts]
             
-            # load: 실제 top-k dispatch 결과 (hard routing 분포)
-            # Normalize by top_k to maintain consistent loss scale
+            # Top-k selection for load calculation
+            current_top_k = self.top_k if self.training else self.eval_top_k
+            gate_scores_flat = gate_scores.view(-1, self.num_experts)  # [B*H*W, num_experts]
+            _, top_k_indices = gate_scores_flat.topk(current_top_k, dim=-1)
+            mask = torch.zeros_like(gate_scores_flat).scatter_(1, top_k_indices, 1)
             load = (mask / current_top_k).float().mean(0)  # [num_experts]
             
-            # Official Switch Transformer load balancing loss
-            aux_loss = self.aux_loss_weight * (importance * load).mean() * (self.num_experts ** 2)
+            # Load balancing loss
+            aux_loss = self.aux_loss_weight * (avg_gate_scores * load).mean() * (self.num_experts ** 2)
         
         return gate_scores, aux_loss
     
@@ -153,20 +113,20 @@ class SS2DExpert(nn.Module):
             use_out_proj=False,
             use_out_norm=True
         )
-
-        self.avg_pool = nn.AdaptiveAvgPool2d((1, 1))
         
     def forward(self, x):
+        """
+        Spatial-wise expert processing
+        Args:
+            x: [B, H, W, dim]
+        Returns:
+            output: [B, H, W, dim] - spatial features 유지
+        """
         B, H, W, dim = x.shape
 
         x_expert, _ = self.ss2d_block(x)  # [B, H, W, dim]
-
-        x_expert = x_expert.permute(0, 3, 1, 2)  # [B, dim, H, W]
-        x_expert = self.avg_pool(x_expert).view(B, -1)  # [B, dim]
-
-        output = x_expert
         
-        return output
+        return x_expert
 
 
 class MoEFSCIL(nn.Module):
@@ -215,33 +175,63 @@ class MoEFSCIL(nn.Module):
         self.register_buffer('total_samples', torch.tensor(0, dtype=torch.long))
         
     def forward(self, x):
-
+        """
+        Spatial-wise MoE forward pass
+        
+        Args:
+            x: [B, H, W, dim]
+            
+        Returns:
+            output: [B, dim] - global pooled output
+            aux_loss: Load balancing loss
+        """
         B, H, W, dim = x.shape
         
-        # Pass spatial information directly to gate for spatial-aware routing
-        gate_scores, aux_loss = self.gate(x)  # [B, num_experts] - x is [B, H, W, dim]
+        # Step 1: Get spatial-wise gate scores
+        gate_scores, aux_loss = self.gate(x)  # [B, H, W, num_experts]
         
-        # Find top-k experts for each token (학습/평가 모드에 따라 다른 top_k 사용)
+        # Step 2: Top-k selection per spatial position
         current_top_k = self.top_k if self.training else self.eval_top_k
-        top_k_scores, top_k_indices = gate_scores.topk(current_top_k, dim=-1)  # [B, top_k]
+        top_k_scores, top_k_indices = gate_scores.topk(current_top_k, dim=-1)  # [B, H, W, top_k]
         
         # 가중치 정규화: 선택된 experts의 가중치 합이 1이 되도록
-        top_k_scores = F.softmax(top_k_scores, dim=-1)  # [B, top_k]
+        top_k_scores = top_k_scores / top_k_scores.sum(dim=-1, keepdim=True)  # [B, H, W, top_k]
         
-        # Debug: 10번째 forward마다 현재 배치, 100번째마다 누적 통계 출력
+        # Step 3: Compute all expert outputs (병렬 처리)
+        expert_outputs = []
+        for expert_idx in range(self.num_experts):
+            expert_out = self.experts[expert_idx](x)  # [B, H, W, dim]
+            expert_outputs.append(expert_out)
+        expert_outputs = torch.stack(expert_outputs, dim=3)  # [B, H, W, num_experts, dim]
+        
+        # Step 4: Spatial-wise weighted sum
+        # Create a mask for sparse routing
+        mask = torch.zeros(B, H, W, self.num_experts, device=x.device)  # [B, H, W, num_experts]
+        for k in range(current_top_k):
+            expert_idx = top_k_indices[..., k]  # [B, H, W]
+            weight = top_k_scores[..., k]  # [B, H, W]
+            mask.scatter_(3, expert_idx.unsqueeze(-1), weight.unsqueeze(-1))
+        
+        # Apply mask and sum over experts
+        mask = mask.unsqueeze(-1)  # [B, H, W, num_experts, 1]
+        mixed_spatial = (expert_outputs * mask).sum(dim=3)  # [B, H, W, dim]
+        
+        # Step 5: Global pooling
+        mixed_spatial = mixed_spatial.permute(0, 3, 1, 2)  # [B, dim, H, W]
+        output = F.adaptive_avg_pool2d(mixed_spatial, (1, 1)).view(B, dim)  # [B, dim]
+        
+        # Debug: 10번째 forward마다 현재 배치 통계 출력
         if hasattr(self, 'debug_enabled') and self.debug_enabled:
-            # Forward pass counter 증가
             if not hasattr(self, 'forward_count'):
                 self.forward_count = 0
             self.forward_count += 1
             
             # 10번째 forward마다 현재 배치 통계 출력
             if self.forward_count % 10 == 0:
-                # 현재 배치에서 각 expert 활성화 횟수 계산
+                # Spatial-wise expert 활성화 횟수 계산
                 expert_counts = torch.bincount(top_k_indices.flatten(), minlength=self.num_experts)
                 total_activations = expert_counts.sum().item()
                 
-                # 모든 experts 상태를 표시 (활성화되지 않은 것은 -)
                 expert_status = []
                 active_count = 0
                 for expert_id in range(self.num_experts):
@@ -254,49 +244,35 @@ class MoEFSCIL(nn.Module):
                         expert_status.append("  - ")
 
                 status_str = " | ".join([f"E{i}:{status}" for i, status in enumerate(expert_status)])
+                
+                # Gate scores 평균 출력 (배치 및 spatial 평균)
+                avg_gate_scores = gate_scores.mean(dim=[0, 1, 2])  # [num_experts]
+                gate_scores_str = " | ".join([f"E{i}:{score.item()*100:5.2f}%" for i, score in enumerate(avg_gate_scores)])
+                
                 print("=" * 100)
-                print(f"Forward #{self.forward_count:4d} | Batch Active: {active_count}/{self.num_experts} | {status_str}")
+                print(f"Forward #{self.forward_count:4d} | Spatial Active: {active_count}/{self.num_experts} | {status_str}")
+                print(f"Gate Scores (spatial avg): {gate_scores_str}")
                 print("=" * 100)
             
             # 100번째 forward마다 누적 통계 출력
-            if self.forward_count % 469 == 0 and self.total_samples > 0:
-                cumulative_counts = self.expert_activation_counts.cpu().numpy()
-                total_samples = self.total_samples.item()
-                cumulative_ratios = cumulative_counts / total_samples if total_samples > 0 else cumulative_counts
+            if self.forward_count % 94 == 0:
+                # Spatial-wise routing에서는 누적 통계가 의미가 다름
+                expert_counts = torch.bincount(top_k_indices.flatten(), minlength=self.num_experts)
+                total_activations = expert_counts.sum().item()
                 
                 cumulative_status = []
                 for expert_id in range(self.num_experts):
-                    ratio = cumulative_ratios[expert_id]
+                    count = expert_counts[expert_id].item()
+                    ratio = count / total_activations if total_activations > 0 else 0.0
                     cumulative_status.append(f"{ratio*100:5.2f}%")
                 
                 cumulative_str = " | ".join([f"E{i}:{status}" for i, status in enumerate(cumulative_status)])
                 print("🔥" * 50)
-                print(f"📊 CUMULATIVE STATS (after {self.forward_count} forwards, {total_samples:,} samples)")
+                print(f"📊 CUMULATIVE SPATIAL STATS (after {self.forward_count} forwards)")
                 print(f"{cumulative_str}")
                 print("🔥" * 50)
         
-        # Initialize output
-        mixed_output = torch.zeros(B, dim, device=x.device, dtype=x.dtype)
-        
-        # Process only selected experts (sparse activation)
-        for i in range(B):  # For each sample in batch
-            for k in range(current_top_k):  # For each selected expert
-                expert_idx = top_k_indices[i, k].item()
-                expert_weight = top_k_scores[i, k]
-                
-                # SS2D expert processes spatial input
-                expert_output = self.experts[expert_idx](x[i:i+1])  # [1, dim]
-                mixed_output[i] += expert_weight * expert_output.squeeze(0)
-                
-                # 누적 통계 추적 (training 모드에서만)
-                if self.training:
-                    self.expert_activation_counts[expert_idx] += 1
-        
-        # 샘플 수 누적 (training 모드에서만)
-        if self.training:
-            self.total_samples += B
-        
-        return mixed_output, aux_loss
+        return output, aux_loss
 
 
 @NECKS.register_module()

@@ -713,7 +713,7 @@ def fscil(model,
             logger.info("Labels : {}".format(cur_session_labels.tolist()))
             cur_session_loader = build_dataloader(
                 cur_dataset,
-                samples_per_gpu=8,
+                samples_per_gpu=32,  # Increased for spatial-wise routing stability
                 workers_per_gpu=1,
                 num_gpus=len(cfg.gpu_ids),
                 dist=distributed,
