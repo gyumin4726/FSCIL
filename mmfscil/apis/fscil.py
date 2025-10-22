@@ -363,10 +363,6 @@ def test_session(cfg,
         label_list.extend(data['gt_label'].tolist())
         if rank == 0:
             prog_bar.update(len(result) * world_size)
-    if rank == 0:
-        prog_bar = mmcv.ProgressBar(len(test_set_memory))
-    else:
-        prog_bar = None
 
     # To circumvent MMCV bug
     if rank == 0:
@@ -418,116 +414,6 @@ def test_session(cfg,
     return acc
 
 
-def test_session_feat(
-        cfg,
-        model,
-        distributed,
-        test_feat: torch.Tensor,
-        test_label: torch.Tensor,
-        cls_feat: torch.Tensor,  # For feat compare
-        logger,
-        session_idx: int,
-        inc_start: int,
-        inc_end: int,
-        base_num: int):
-    logger.info("[Feat Evaluator] Extracting cls feat".format(
-        session_idx, inc_start, inc_end))
-    with torch.no_grad():
-        cls_feat_after_neck = model(return_loss=False,
-                                    return_feat=True,
-                                    img=cls_feat,
-                                    gt_label=None)
-        cls_feat_after_neck = model.module.head.pre_logits(cls_feat_after_neck)
-    logger.info("[Feat Evaluator] length of cls vector : {}.".format(
-        len(cls_feat_after_neck)))
-    cls_feat_after_neck_min = cls_feat_after_neck.detach().clone()
-    cls_feat_after_neck_max = cls_feat_after_neck.detach().clone()
-    dist.all_reduce(cls_feat_after_neck_min, op=dist.ReduceOp.MIN)
-    dist.all_reduce(cls_feat_after_neck_max, op=dist.ReduceOp.MAX)
-    assert torch.allclose(cls_feat_after_neck_min, cls_feat_after_neck_max)
-    rank, world_size = get_dist_info()
-    model.eval()
-    logger.info("[Feat Evaluator]Evaluating session {}, from {} to {}.".format(
-        session_idx, inc_start, inc_end))
-    test_set_memory = MemoryDataset(
-        feats=test_feat[torch.logical_and(torch.ge(test_label, inc_start),
-                                          torch.less(test_label, inc_end))],
-        labels=test_label[torch.logical_and(torch.ge(test_label, inc_start),
-                                            torch.less(test_label, inc_end))])
-    test_loader_memory = build_dataloader(
-        test_set_memory,
-        samples_per_gpu=256,
-        workers_per_gpu=1,
-        num_gpus=len(cfg.gpu_ids),
-        dist=distributed,
-        seed=cfg.get('seed'),
-        shuffle=False,
-        persistent_workers=False,
-        pin_memory=False,
-        round_up=False,
-    )
-
-    result_list = []
-    label_list = []
-    if rank == 0:
-        prog_bar = mmcv.ProgressBar(len(test_set_memory))
-    else:
-        prog_bar = None
-    for data in test_loader_memory:
-        with torch.no_grad():
-            result = model(return_loss=False,
-                           return_feat=True,
-                           img=data['feat'],
-                           gt_label=None)
-            pre_logits = model.module.head.pre_logits(result)
-            pre_label = (pre_logits @ cls_feat_after_neck.t()).argmax(dim=-1)
-            acc = torch.eq(pre_label, data['gt_label'].to(device=pre_label.device)).\
-                to(dtype=torch.float32).cpu().numpy().tolist()
-        result_list.extend(acc)
-        label_list.extend(data['gt_label'].tolist())
-        if rank == 0:
-            prog_bar.update(len(result) * world_size)
-
-    # To circumvent MMCV bug
-    if rank == 0:
-        print()
-
-    if distributed:
-        recv_list = [None for _ in range(world_size)]
-        dist.all_gather_object(recv_list, result_list)
-        results = []
-        for machine in recv_list:
-            results.extend(machine)
-
-        recv_list = [None for _ in range(world_size)]
-        dist.all_gather_object(recv_list, label_list)
-        labels = []
-        for machine in recv_list:
-            labels.extend(machine)
-    else:
-        results = result_list
-        labels = label_list
-    assert len(results) == len(test_set_memory)
-    assert len(results) == len(labels)
-    results = torch.tensor(results)
-    labels = torch.tensor(labels)
-    acc = torch.mean(results).item() * 100.
-    acc_b = torch.mean(results[labels < base_num]).item() * 100.
-    acc_i = torch.mean(results[labels >= base_num]).item() * 100.
-    acc_i_new = torch.mean(
-        results[labels >= inc_end - cfg.inc_step]).item() * 100.
-    acc_i_old = torch.mean(results[torch.logical_and(
-        torch.less(labels, inc_end - cfg.inc_step), torch.ge(
-            labels, base_num))]).item() * 100.
-    logger.info(
-        "[{:02d}]Evaluation results : acc : {:.2f} ; acc_base : {:.2f} ; acc_inc : {:.2f}"
-        .format(session_idx, acc, acc_b, acc_i))
-    logger.info(
-        "[{:02d}]Evaluation results : acc_incremental_old : {:.2f} ; acc_incremental_new : {:.2f}"
-        .format(session_idx, acc_i_old, acc_i_new))
-    return acc
-
-
 def fscil(model,
           cfg,
           distributed=False,
@@ -565,10 +451,6 @@ def fscil(model,
     # Now start to finetune
     model_finetune = copy.deepcopy(model)
     model_finetune.backbone = None
-    if False:  #model.neck.detach_residual:
-        model_finetune.neck.mlp_proj = None
-        model_finetune.neck.pos_embed = None
-        model_finetune.neck.block = None
     if distributed:
         find_unused_parameters = cfg.get('find_unused_parameters', False)
         # Sets the `find_unused_parameters` parameter in
@@ -619,16 +501,11 @@ def fscil(model,
     logger.info("Start to execute the incremental sessions.")
     logger.info(f"Prototypes features shape: {proto_memory.shape}.")
     logger.info(f"Incremental features shape: {inc_feat.shape}.")
-    # model_finetune.module.head.etf_rect[:, :inc_start] = 1.
     save_checkpoint(model_finetune,
                     os.path.join(cfg.work_dir, 'session_{}.pth'.format(0)))
-    # class_weight = model_finetune.module.head.compute_loss.class_weight
     for i in range((inc_end - inc_start) // inc_step):
         label_start = inc_start + i * inc_step
         label_end = inc_start + (i + 1) * inc_step
-        # model_finetune.module.head.etf_rect[:, inc_start:label_start] = 1.
-        # model_finetune.module.head.compute_loss.class_weight = class_weight[:label_end]
-        # logger.info("etf_rect : {}".format(model_finetune.module.head.etf_rect.tolist()))
         dash_line = '-' * 60
         logger.info("Starting session : {} {}".format(i + 2, dash_line))
         logger.info("Newly added classes are from {} to {}.".format(
@@ -642,58 +519,31 @@ def fscil(model,
         num_steps = cfg.step_list[i]
         logger.info("{} steps".format(num_steps))
         if num_steps > 0:
-            if cfg.mean_cur_feat:
-                logger.info(
-                    "Extracting all mean neck feats from {} to {}".format(
-                        inc_start, label_end))
-                logger.info("Copy {} duplications.".format(cfg.copy_list[i]))
-                mean_feat = []
-                mean_label = []
-                for idx in range(inc_start, label_end):
-                    mean_feat.append(inc_feat[inc_label == idx].mean(
-                        dim=0, keepdim=True))
-                    mean_label.append(inc_label[inc_label == idx][0:1])
-                cur_session_feats = torch.cat(mean_feat).repeat(
-                    cfg.copy_list[i], 1, 1, 1)
-                cur_session_labels = torch.cat(mean_label).repeat(
-                    cfg.copy_list[i])
-            elif cfg.mean_neck_feat:
-                logger.info("Extracting mean neck feat from {} to {}".format(
-                    inc_start, label_start))
-                logger.info("Copy {} duplications.".format(cfg.copy_list[i]))
-                cur_session_feats = inc_feat[torch.logical_and(
-                    torch.ge(inc_label, label_start),
-                    torch.less(inc_label, label_end))]
-                cur_session_labels = inc_label[torch.logical_and(
-                    torch.ge(inc_label, label_start),
-                    torch.less(inc_label, label_end))]
+            logger.info("Extracting mean neck feat from {} to {}".format(
+                inc_start, label_start))
+            logger.info("Copy {} duplications.".format(cfg.copy_list[i]))
+            cur_session_feats = inc_feat[torch.logical_and(
+                torch.ge(inc_label, label_start),
+                torch.less(inc_label, label_end))]
+            cur_session_labels = inc_label[torch.logical_and(
+                torch.ge(inc_label, label_start),
+                torch.less(inc_label, label_end))]
 
-                mean_feat = []
-                mean_label = []
-                for idx in range(inc_start, label_start):
-                    mean_feat.append(inc_feat[inc_label == idx].mean(
-                        dim=0, keepdim=True))
-                    mean_label.append(inc_label[inc_label == idx][0:1])
-                if label_start > inc_start:
-                    cur_session_feats = torch.cat([
-                        cur_session_feats,
-                        torch.cat(mean_feat).repeat(cfg.copy_list[i], 1, 1, 1)
-                    ])
-                    cur_session_labels = torch.cat([
-                        cur_session_labels,
-                        torch.cat(mean_label).repeat(cfg.copy_list[i])
-                    ])
-                    # cur_session_feats = torch.cat([cur_session_feats, torch.cat(mean_feat)])
-                    # cur_session_labels = torch.cat([cur_session_labels, torch.cat(mean_label)])
-            else:
-                logger.info("Extracting feats from {} to {}".format(
-                    inc_start, label_start))
-                cur_session_feats = inc_feat[torch.logical_and(
-                    torch.ge(inc_label, inc_start),
-                    torch.less(inc_label, label_end))]
-                cur_session_labels = inc_label[torch.logical_and(
-                    torch.ge(inc_label, inc_start),
-                    torch.less(inc_label, label_end))]
+            mean_feat = []
+            mean_label = []
+            for idx in range(inc_start, label_start):
+                mean_feat.append(inc_feat[inc_label == idx].mean(
+                    dim=0, keepdim=True))
+                mean_label.append(inc_label[inc_label == idx][0:1])
+            if label_start > inc_start:
+                cur_session_feats = torch.cat([
+                    cur_session_feats,
+                    torch.cat(mean_feat).repeat(cfg.copy_list[i], 1, 1, 1)
+                ])
+                cur_session_labels = torch.cat([
+                    cur_session_labels,
+                    torch.cat(mean_label).repeat(cfg.copy_list[i])
+                ])
             cur_session_feats = torch.cat([
                 cur_session_feats,
                 proto_memory.repeat(cfg.base_copy_list[i], 1, 1, 1)
@@ -793,53 +643,31 @@ def fscil(model,
                         info = info + f"| {key}={log_vars[key]} |"
                     if info != "":
                         logger.info(info)
-            # is False
-            if cfg.feat_test:
-                cls_feat = []
-                for idx in range(0, label_end):
-                    cls_feat.append(
-                        cur_session_feats[cur_session_labels == idx].mean(
-                            dim=0, keepdim=True))
-                cls_feat = torch.cat(cls_feat)
-                result = test_session_feat(cfg,
-                                        model_finetune,
-                                        distributed,
-                                        test_feat,
-                                        test_label,
-                                        cls_feat,
-                                        logger,
-                                        i + 2,
-                                        0,
-                                        label_end,
-                                        inc_start,
-                                        mode='test')
-                acc = result
-            else:
-                result = test_session(cfg, model_finetune, distributed, test_feat,
-                                   test_label, logger, i + 2, 0, label_end,
-                                   inc_start, save_results=True)
-                session_results.append(result)
-                acc = result['acc']
-                
-                # 각 세션 결과 즉시 출력
-                logger.info(
-                    "[{:02d}]Evaluation results : acc : {:.2f} ; acc_base : {:.2f} ; acc_inc : {:.2f}"
-                    .format(result['session'], result['acc'], result['acc_base'], result['acc_inc']))
-                logger.info(
-                    "[{:02d}]Evaluation results : acc_incremental_old : {:.2f} ; acc_incremental_new : {:.2f}"
-                    .format(result['session'], result['acc_incremental_old'], result['acc_incremental_new']))
-                
-                acc_train = test_session(cfg,
-                                         model_finetune,
-                                         distributed,
-                                         cur_session_feats,
-                                         cur_session_labels,
-                                         logger,
-                                         i + 2,
-                                         0,
-                                         label_end,
-                                         inc_start,
-                                         mode='train')
+            result = test_session(cfg, model_finetune, distributed, test_feat,
+                               test_label, logger, i + 2, 0, label_end,
+                               inc_start, save_results=True)
+            session_results.append(result)
+            acc = result['acc']
+            
+            # 각 세션 결과 즉시 출력
+            logger.info(
+                "[{:02d}]Evaluation results : acc : {:.2f} ; acc_base : {:.2f} ; acc_inc : {:.2f}"
+                .format(result['session'], result['acc'], result['acc_base'], result['acc_inc']))
+            logger.info(
+                "[{:02d}]Evaluation results : acc_incremental_old : {:.2f} ; acc_incremental_new : {:.2f}"
+                .format(result['session'], result['acc_incremental_old'], result['acc_incremental_new']))
+            
+            acc_train = test_session(cfg,
+                                     model_finetune,
+                                     distributed,
+                                     cur_session_feats,
+                                     cur_session_labels,
+                                     logger,
+                                     i + 2,
+                                     0,
+                                     label_end,
+                                     inc_start,
+                                     mode='train')
             acc_list.append(acc)
             acc_list_train.append(acc_train)
             save_checkpoint(
