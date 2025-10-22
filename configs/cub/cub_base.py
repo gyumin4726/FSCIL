@@ -23,7 +23,7 @@ model = dict(backbone=dict(type='VMambaBackbone',
                       eval_top_k=2,
                       in_channels=1024, 
                       out_channels=1024,
-                      feat_size=7,
+                      feat_size=9,
                       use_aux_loss=False,
                       aux_loss_weight=0.01),
              head=dict(type='ETFHead',
@@ -43,11 +43,8 @@ optimizer = dict(
     weight_decay=0.0005,
     paramwise_cfg=dict(
         custom_keys={
-            # 기본 컴포넌트들
             'backbone': dict(lr_mult=0.1),
             'neck.pos_embed': dict(lr_mult=1.0),
-            
-            # MoE 컴포넌트들
             'neck.moe.gate': dict(lr_mult=1.5),     
             'neck.moe.experts': dict(lr_mult=5.0),
         }
@@ -61,12 +58,11 @@ lr_config = dict(
     cool_down_ratio=0.1,
     cool_down_time=10,
     by_epoch=False,
-    # warmup
     warmup='linear',
     warmup_iters=100,
     warmup_ratio=0.1,
     warmup_by_epoch=False)
 
-runner = dict(type='EpochBasedRunner', max_epochs=20)
+runner = dict(type='EpochBasedRunner', max_epochs=30)
 
 find_unused_parameters = True
