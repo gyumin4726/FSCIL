@@ -347,10 +347,9 @@ class MoEFSCILNeck(BaseModule):
         moe_output, moe_aux_loss = self.moe(x_spatial)
         
         # Prepare outputs
-        outputs.update({
+        outputs = {
             'out': moe_output,
             'aux_loss': moe_aux_loss,
-            'main': moe_output,
-        })
+        }
         
         return outputs

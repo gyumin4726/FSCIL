@@ -1,15 +1,11 @@
 import numpy as np
 import torch
-import torch.distributed as dist
-import torch.nn.functional as F
-from mmcv.runner import get_dist_info
 
 from mmcls.models.builder import (CLASSIFIERS, build_backbone, build_head,
                                   build_neck)
 from mmcls.models.classifiers.base import BaseClassifier
 from mmcls.models.heads import MultiLabelClsHead
 from mmcls.models.utils.augment import Augments
-from mmcls.utils import get_root_logger
 
 
 @CLASSIFIERS.register_module()
@@ -47,7 +43,6 @@ class ImageClassifierCIL(BaseClassifier):
         if pretrained:
             self.init_cfg = dict(type='Pretrained', checkpoint=pretrained)
         self.backbone = build_backbone(backbone)
-        self.mamba_neck = False if neck.type.find('Mamba') < 0 else True
 
         if neck:
             self.neck = build_neck(neck)
@@ -138,23 +133,14 @@ class ImageClassifierCIL(BaseClassifier):
             lam = None
 
         x = self.extract_feat(img)
+        
+        aux_loss = None
         if isinstance(x, dict):
-            x_main = x.get('main')
-            x_residual = x.get('residual')
-            dts = x.get('dts')
-            Bs = x.get('Bs')
-            Cs = x.get('Cs')
-            dts_new = x.get('dts_new')
-            Bs_new = x.get('Bs_new')
-            Cs_new = x.get('Cs_new')
             aux_loss = x.get('aux_loss')  # MoE load balancing loss
             x = x['out']
 
         losses = dict()
-        if self.mixup == 0.:
-            loss = self.head.forward_train(x, gt_label)
-            losses.update(loss)
-            
+        
         # Add MoE auxiliary loss for load balancing
         if aux_loss is not None:
             losses['aux_loss'] = aux_loss
@@ -167,12 +153,14 @@ class ImageClassifierCIL(BaseClassifier):
             losses['loss_aux'] = loss['loss'] * (1 - lam)
             del losses['loss']
 
-        # Calculate norms for different feature sets
+        # Calculate feature norms for base / incremental classes
         indices_base = gt_label < self.head.base_classes
-        indices_novel = gt_label >= self.head.base_classes
-        self.calculate_norms(losses, indices_base, indices_novel, x, x_main,
-                             x_residual, dts, Bs, Cs, dts_new, Bs_new, Cs_new)
-
+        if indices_base.any():
+            losses['norm_main_base'] = torch.norm(x[indices_base])
+        
+        indices_inc = gt_label >= self.head.base_classes
+        if indices_inc.any():
+            losses['norm_main_inc'] = torch.norm(x[indices_inc])
 
         # mixup feat when mixup > 0, this cannot be with augment mixup
         if self.mixup > 0. and self.mixup_prob > 0. and np.random.random() > (
@@ -189,35 +177,6 @@ class ImageClassifierCIL(BaseClassifier):
             losses.update(loss)
 
         return losses
-
-
-
-
-    def calculate_norms(self, losses, indices_base, indices_novel, x, x_main,
-                        x_residual, dts, Bs, Cs, dts_new, Bs_new, Cs_new):
-        """
-        Calculates the norms of feature tensors.
-
-        Args:
-            losses (dict): Dictionary to store calculated norms.
-            indices_base (Tensor): Indices for base class examples.
-            indices_novel (Tensor): Indices for novel class examples.
-            feature_tensors (dict): Feature tensors keyed by their type.
-        """
-        # Base and novel feature norms
-        for key, value in [('input', x), ('main', x_main),
-                           ('residual', x_residual)]:
-            if value is not None:
-                losses[f'norm_{key}_base'] = torch.norm(value[indices_base])
-                losses[f'norm_{key}_novel'] = torch.norm(value[indices_novel])
-
-        # Input-dependent parameters norms
-        for key, value in [('dts', dts), ('Bs', Bs), ('Cs', Cs),
-                           ('dts_new', dts_new), ('Bs_new', Bs_new),
-                           ('Cs_new', Cs_new)]:
-            if value is not None:
-                losses[f'norm_{key}_base'] = torch.norm(value[indices_base])
-                losses[f'norm_{key}_novel'] = torch.norm(value[indices_novel])
 
     def simple_test(self,
                     img,

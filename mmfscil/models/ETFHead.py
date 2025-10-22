@@ -180,14 +180,6 @@ class ETFHead(ClsHead):
                 }
         return losses
 
-    def mixup_extra_training(self, x: torch.Tensor) -> Dict:
-        x = self.pre_logits(x)
-        cls_score = x @ self.etf_vec
-        assigned = torch.argmax(cls_score[:, self.eval_classes:], dim=1)
-        target = self.etf_vec[:, assigned + self.eval_classes].t()
-        losses = self.loss(x, target)
-        return losses
-
     def loss(self, feat, target, **kwargs):
         losses = dict()
         # compute loss
