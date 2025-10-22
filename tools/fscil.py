@@ -12,7 +12,6 @@ import torch.distributed as dist
 from mmcv import Config, DictAction
 from mmcv.runner import get_dist_info, init_dist, load_checkpoint
 
-import mmfewshot  # noqa: F401
 from mmcls import __version__
 from mmcls.apis import init_random_seed, set_random_seed
 from mmcls.models import build_classifier
