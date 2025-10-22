@@ -1,17 +1,12 @@
-from collections import OrderedDict
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from einops import rearrange
-from mmcv.cnn import build_norm_layer
 from mmcv.runner import BaseModule
-from rope import *
 from timm.models.layers import trunc_normal_
 
 from mmcls.models.builder import NECKS
 from mmcls.utils import get_root_logger
 
-from .mamba_ssm.modules.mamba_simple import Mamba
 from .ss2d import SS2D
 
 
@@ -53,10 +48,6 @@ class FSCILGate(nn.Module):
         self.expert_queries = nn.Parameter(torch.randn(num_experts, dim))
         nn.init.xavier_uniform_(self.expert_queries)
         
-        # Spatial gating projection
-        self.gate_proj = nn.Linear(dim, num_experts)
-
-        
     def forward(self, x: torch.Tensor):
         """
         Self-attention + Cross-attention based gating
@@ -87,7 +78,7 @@ class FSCILGate(nn.Module):
         
         # Step 4: Cross-attention for expert routing
         # Query: contextualized features, Key&Value: expert queries
-        attended_features, attention_weights = self.expert_cross_attention(
+        _, attention_weights = self.expert_cross_attention(
             query=contextualized_features,  # [B, H*W, dim] - self-attention으로 contextualized된 features
             key=expert_queries,            # [B, num_experts, dim]
             value=expert_queries           # [B, num_experts, dim]
@@ -139,9 +130,6 @@ class SS2DExpert(nn.Module):
                  ssm_expand_ratio=1.0):
         super().__init__()
         self.dim = dim
-        self.expert_id = expert_id
-        self.d_state = d_state
-        self.dt_rank = dt_rank
         
         directions = ('h', 'h_flip', 'v', 'v_flip')
         self.ss2d_block = SS2D(
@@ -163,10 +151,8 @@ class SS2DExpert(nn.Module):
 
         x_expert = x_expert.permute(0, 3, 1, 2)  # [B, dim, H, W]
         x_expert = self.avg_pool(x_expert).view(B, -1)  # [B, dim]
-
-        output = x_expert
         
-        return output
+        return x_expert
 
 
 class MoEFSCIL(nn.Module):
@@ -176,7 +162,6 @@ class MoEFSCIL(nn.Module):
                  num_experts=4,
                  top_k=2,
                  eval_top_k=None,
-                 feat_size=7,
                  d_state=1,
                  dt_rank=4,
                  ssm_expand_ratio=1.0,
@@ -271,7 +256,7 @@ class MoEFSCIL(nn.Module):
                 
                 cumulative_str = " | ".join([f"E{i}:{status}" for i, status in enumerate(cumulative_status)])
                 print("🔥" * 50)
-                print(f"📊 CUMULATIVE STATS (after {self.forward_count} forwards, {total_samples:,} samples)")
+                print(f"CUMULATIVE STATS (after {self.forward_count} forwards, {total_samples:,} samples)")
                 print(f"{cumulative_str}")
                 print("🔥" * 50)
         
@@ -324,8 +309,6 @@ class MoEFSCILNeck(BaseModule):
         self.logger = get_root_logger()
         self.logger.info(f"MoE-FSCIL Neck initialized: {num_experts} experts, top-{top_k} activation (train), top-{self.eval_top_k} activation (eval)")
         
-        self.avg = nn.AdaptiveAvgPool2d((1, 1))
-
         self.pos_embed = nn.Parameter(
             torch.zeros(1, feat_size * feat_size, out_channels)
         )
@@ -336,7 +319,6 @@ class MoEFSCILNeck(BaseModule):
             num_experts=num_experts,
             top_k=top_k,
             eval_top_k=self.eval_top_k,
-            feat_size=feat_size,
             d_state=1,
             dt_rank=4,
             ssm_expand_ratio=1.0,
