@@ -1,26 +1,16 @@
-from collections import OrderedDict
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from einops import rearrange
-from mmcv.cnn import build_norm_layer
 from mmcv.runner import BaseModule
-from rope import *
 from timm.models.layers import trunc_normal_
 
 from mmcls.models.builder import NECKS
 from mmcls.utils import get_root_logger
 
-from .mamba_ssm.modules.mamba_simple import Mamba
 from .ss2d import SS2D
 
 
 class FSCILGate(nn.Module):
-    """Simplified MoE Gate inspired by official MoE implementation.
-    
-    Uses simple linear projection instead of attention mechanisms,
-    while maintaining flexible top-k routing and Switch Transformer load balancing.
-    """
     def __init__(self,
                  dim,
                  num_experts: int,
@@ -28,7 +18,7 @@ class FSCILGate(nn.Module):
                  eval_top_k: int = None,
                  use_aux_loss: bool = True,
                  aux_loss_weight: float = 0.01,
-                 num_heads: int = 8):  # Kept for compatibility, not used
+                 num_heads: int = 8):
         super().__init__()
         self.dim = dim
         self.num_experts = num_experts
@@ -38,17 +28,12 @@ class FSCILGate(nn.Module):
         self.aux_loss_weight = aux_loss_weight
         
         # Simple linear projection for routing (official MoE style)
-        # Parameters: dim * num_experts (~4K for dim=1024, num_experts=4)
         self.gate = nn.Linear(dim, num_experts, bias=False)
-        
-        # Initialize with small values for stability
         nn.init.normal_(self.gate.weight, mean=0.0, std=0.01)
-
         
     def forward(self, x: torch.Tensor):
         """
         Simplified linear projection based gating (official MoE style).
-        Maintains flexible top-k routing and Switch Transformer load balancing.
         
         Args:
             x: Input spatial features [B, H, W, dim]
@@ -60,17 +45,15 @@ class FSCILGate(nn.Module):
         B, H, W, dim = x.shape
         
         # Step 1: Spatial pooling (aggregate spatial information)
-        # [B, H, W, dim] -> [B, dim]
-        x_pooled = x.mean(dim=[1, 2])  # Global average pooling
+        x_pooled = x.mean(dim=[1, 2])  # [B, H, W, dim] -> [B, dim]
         
-        # Step 2: Simple linear projection to expert logits (official MoE style)
-        # [B, dim] -> [B, num_experts]
-        gate_logits = self.gate(x_pooled)
+        # Step 2: Simple linear projection to expert logits
+        gate_logits = self.gate(x_pooled)  # [B, dim] -> [B, num_experts]
         
         # Step 3: Softmax to get routing probabilities
         raw_gate_scores = F.softmax(gate_logits, dim=-1)  # [B, num_experts]
         
-        # Step 4: Top-k selection (flexible: train vs eval)
+        # Step 4: Top-k selection
         current_top_k = self.top_k if self.training else self.eval_top_k
         top_k_scores, top_k_indices = raw_gate_scores.topk(current_top_k, dim=-1)  # [B, top_k]
         
@@ -78,20 +61,14 @@ class FSCILGate(nn.Module):
         mask = torch.zeros_like(raw_gate_scores).scatter_(1, top_k_indices, 1)
         masked_gate_scores = raw_gate_scores * mask
         
-        # Step 6: Keep original scores (not normalized within top-k)
+        # Step 6: Keep original scores
         gate_scores = masked_gate_scores 
         
-        # Step 7: Compute auxiliary loss for load balancing (Switch Transformer style)
+        # Step 7: Compute auxiliary loss for load balancing
         aux_loss = None
-        if self.use_aux_loss and self.training:
-            # importance: 원본 softmax 확률의 평균 (soft routing 기준 기대 분포)
+        if self.use_aux_loss:
             importance = raw_gate_scores.mean(0)     # [num_experts]
-            
-            # load: 실제 top-k dispatch 결과 (hard routing 분포)
-            # Normalize by top_k to maintain consistent loss scale
             load = (mask / current_top_k).float().mean(0)  # [num_experts]
-            
-            # Switch Transformer load balancing loss
             aux_loss = self.aux_loss_weight * (importance * load).mean() * (self.num_experts ** 2)
         
         return gate_scores, aux_loss
@@ -145,7 +122,6 @@ class MoEFSCIL(nn.Module):
                  num_experts=4,
                  top_k=2,
                  eval_top_k=None,
-                 feat_size=7,
                  d_state=1,
                  dt_rank=4,
                  ssm_expand_ratio=1.0,
@@ -269,7 +245,7 @@ class MoEFSCIL(nn.Module):
 
 
 @NECKS.register_module()
-class MoEFSCILNeck(BaseModule):
+class MoEFSCILNeckLinear(BaseModule):
 
     def __init__(self,
                  in_channels=512,
@@ -280,7 +256,7 @@ class MoEFSCILNeck(BaseModule):
                  feat_size=3,
                  use_aux_loss=True,
                  aux_loss_weight=0.01):
-        super(MoEFSCILNeck, self).__init__(init_cfg=None)
+        super(MoEFSCILNeckLinear, self).__init__(init_cfg=None)
         
         self.in_channels = in_channels
         self.out_channels = out_channels
@@ -291,10 +267,8 @@ class MoEFSCILNeck(BaseModule):
         self.use_aux_loss = use_aux_loss
         
         self.logger = get_root_logger()
-        self.logger.info(f"MoE-FSCIL Neck initialized: {num_experts} experts, top-{top_k} activation (train), top-{self.eval_top_k} activation (eval)")
+        self.logger.info(f"MoE-FSCIL Neck (Linear) initialized: {num_experts} experts, top-{top_k} activation (train), top-{self.eval_top_k} activation (eval)")
         
-        self.avg = nn.AdaptiveAvgPool2d((1, 1))
-
         self.pos_embed = nn.Parameter(
             torch.zeros(1, feat_size * feat_size, out_channels)
         )
@@ -305,7 +279,6 @@ class MoEFSCILNeck(BaseModule):
             num_experts=num_experts,
             top_k=top_k,
             eval_top_k=self.eval_top_k,
-            feat_size=feat_size,
             d_state=1,
             dt_rank=4,
             ssm_expand_ratio=1.0,
@@ -334,10 +307,9 @@ class MoEFSCILNeck(BaseModule):
         moe_output, moe_aux_loss = self.moe(x_spatial)
         
         # Prepare outputs
-        outputs.update({
+        outputs = {
             'out': moe_output,
             'aux_loss': moe_aux_loss,
-            'main': moe_output,
-        })
+        }
         
         return outputs

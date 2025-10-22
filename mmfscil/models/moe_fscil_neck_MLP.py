@@ -1,45 +1,11 @@
-from collections import OrderedDict
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from einops import rearrange
-from mmcv.cnn import build_norm_layer
 from mmcv.runner import BaseModule
-from rope import *
 from timm.models.layers import trunc_normal_
 
 from mmcls.models.builder import NECKS
 from mmcls.utils import get_root_logger
-
-
-class MultiScaleAdapter(BaseModule):
-    def __init__(self,
-                 in_channels,
-                 out_channels=512,
-                 feat_size=7):
-        super(MultiScaleAdapter, self).__init__(init_cfg=None)
-        
-        self.in_channels = in_channels
-        self.out_channels = out_channels
-        self.feat_size = feat_size
-
-        # 1. MoE와 동일한 크기로 맞춤
-        self.spatial_adapter = nn.AdaptiveAvgPool2d((feat_size, feat_size))
-        
-        # 2. 간단한 MLP 프로젝션
-        # MLP 제거 - 단순한 1x1 conv로 채널 수만 맞춤
-        self.mlp_proj = nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=False)
-        
-    def forward(self, x):
-        B, C, H, W = x.shape
-        
-        # Step 1: 공간 크기 통일
-        x = self.spatial_adapter(x)  # (B, C, feat_size, feat_size)
-        
-        # Step 2: MLP 프로젝션
-        x = self.mlp_proj(x)         # (B, out_channels, feat_size, feat_size)
-        
-        return x  # (B, out_channels, feat_size, feat_size) - 공간 정보 유지
 
 
 class FSCILGate(nn.Module):
@@ -80,8 +46,6 @@ class FSCILGate(nn.Module):
         self.expert_queries = nn.Parameter(torch.randn(num_experts, dim))
         nn.init.xavier_uniform_(self.expert_queries)
         
-        # Spatial gating projection
-        self.gate_proj = nn.Linear(dim, num_experts)
 
         
     def forward(self, x: torch.Tensor):
@@ -114,7 +78,7 @@ class FSCILGate(nn.Module):
         
         # Step 4: Cross-attention for expert routing
         # Query: contextualized features, Key&Value: expert queries
-        attended_features, attention_weights = self.expert_cross_attention(
+        _, attention_weights = self.expert_cross_attention(
             query=contextualized_features,  # [B, H*W, dim] - self-attention으로 contextualized된 features
             key=expert_queries,            # [B, num_experts, dim]
             value=expert_queries           # [B, num_experts, dim]
@@ -229,6 +193,10 @@ class MoEFSCIL(nn.Module):
             for i in range(num_experts)
         ])
         
+        # Expert 활성화 누적 통계 추적
+        self.register_buffer('expert_activation_counts', torch.zeros(num_experts, dtype=torch.long))
+        self.register_buffer('total_samples', torch.tensor(0, dtype=torch.long))
+        
     def forward(self, x):
 
         B, H, W, dim = x.shape
@@ -243,16 +211,16 @@ class MoEFSCIL(nn.Module):
         # 가중치 정규화: 선택된 experts의 가중치 합이 1이 되도록
         top_k_scores = F.softmax(top_k_scores, dim=-1)  # [B, top_k]
         
-        # Debug: 10번째 forward마다 출력)
+        # Debug: 10번째 forward마다 현재 배치, 100번째마다 누적 통계 출력
         if hasattr(self, 'debug_enabled') and self.debug_enabled:
             # Forward pass counter 증가
             if not hasattr(self, 'forward_count'):
                 self.forward_count = 0
             self.forward_count += 1
             
-            # 10번째 forward마다 출력
+            # 10번째 forward마다 현재 배치 통계 출력
             if self.forward_count % 10 == 0:
-                # 전체 배치에서 각 expert 활성화 횟수 계산
+                # 현재 배치에서 각 expert 활성화 횟수 계산
                 expert_counts = torch.bincount(top_k_indices.flatten(), minlength=self.num_experts)
                 total_activations = expert_counts.sum().item()
                 
@@ -270,8 +238,25 @@ class MoEFSCIL(nn.Module):
 
                 status_str = " | ".join([f"E{i}:{status}" for i, status in enumerate(expert_status)])
                 print("=" * 100)
-                print(f"Forward #{self.forward_count:4d} | Active: {active_count}/{self.num_experts} | {status_str}")
+                print(f"Forward #{self.forward_count:4d} | Batch Active: {active_count}/{self.num_experts} | {status_str}")
                 print("=" * 100)
+            
+            # 100번째 forward마다 누적 통계 출력
+            if self.forward_count % 469 == 0 and self.total_samples > 0:
+                cumulative_counts = self.expert_activation_counts.cpu().numpy()
+                total_samples = self.total_samples.item()
+                cumulative_ratios = cumulative_counts / total_samples if total_samples > 0 else cumulative_counts
+                
+                cumulative_status = []
+                for expert_id in range(self.num_experts):
+                    ratio = cumulative_ratios[expert_id]
+                    cumulative_status.append(f"{ratio*100:5.2f}%")
+                
+                cumulative_str = " | ".join([f"E{i}:{status}" for i, status in enumerate(cumulative_status)])
+                print("🔥" * 50)
+                print(f"CUMULATIVE STATS (after {self.forward_count} forwards, {total_samples:,} samples)")
+                print(f"{cumulative_str}")
+                print("🔥" * 50)
         
         # Initialize output
         mixed_output = torch.zeros(B, dim, device=x.device, dtype=x.dtype)
@@ -285,6 +270,14 @@ class MoEFSCIL(nn.Module):
                 # MLP expert processes spatial input
                 expert_output = self.experts[expert_idx](x[i:i+1])  # [1, dim]
                 mixed_output[i] += expert_weight * expert_output.squeeze(0)
+                
+                # 누적 통계 추적 (training 모드에서만)
+                if self.training:
+                    self.expert_activation_counts[expert_idx] += 1
+        
+        # 샘플 수 누적 (training 모드에서만)
+        if self.training:
+            self.total_samples += B
         
         return mixed_output, aux_loss
 
@@ -299,9 +292,7 @@ class MoEFSCILNeckMLP(BaseModule):
                  top_k=2,
                  eval_top_k=None,
                  hidden_dim=None,
-                 feat_size=2,
-                 use_multi_scale_skip=False,
-                 multi_scale_channels=[128, 256, 512],
+                 feat_size=3,
                  use_aux_loss=True,
                  aux_loss_weight=0.01):
         super(MoEFSCILNeckMLP, self).__init__(init_cfg=None)
@@ -312,44 +303,21 @@ class MoEFSCILNeckMLP(BaseModule):
         self.top_k = top_k
         self.eval_top_k = eval_top_k if eval_top_k is not None else top_k
         self.feat_size = feat_size
-
-        self.use_multi_scale_skip = use_multi_scale_skip
-        self.multi_scale_channels = multi_scale_channels
         self.use_aux_loss = use_aux_loss
-
         
         self.logger = get_root_logger()
         self.logger.info(f"MoE-FSCIL Neck (MLP) initialized: {num_experts} experts, top-{top_k} activation (train), top-{self.eval_top_k} activation (eval)")
         
-        if self.use_multi_scale_skip:
-            self.logger.info(f"Enhanced MoE with Multi-Scale Skip Connections: {len(self.multi_scale_channels)} layers")
-            self.logger.info(f"Multi-Scale Adapters: {self.multi_scale_channels} → {out_channels} channels")
-            self.logger.info(f"Using 2-layer FFN experts (MoE Official style) instead of SS2D")
-        
-        self.avg = nn.AdaptiveAvgPool2d((1, 1))
-
         self.pos_embed = nn.Parameter(
             torch.zeros(1, feat_size * feat_size, out_channels)
         )
         trunc_normal_(self.pos_embed, std=.02)
-
-        if self.use_multi_scale_skip:
-            self.multi_scale_adapters = nn.ModuleList()
-            for ch in self.multi_scale_channels:
-
-                adapter = MultiScaleAdapter(
-                    in_channels=ch,
-                    out_channels=out_channels,
-                    feat_size=self.feat_size,
-                )
-                self.multi_scale_adapters.append(adapter)
 
         self.moe = MoEFSCIL(
             dim=out_channels,
             num_experts=num_experts,
             top_k=top_k,
             eval_top_k=self.eval_top_k,
-            feat_size=feat_size,
             hidden_dim=hidden_dim,
             use_aux_loss=use_aux_loss,
             aux_loss_weight=aux_loss_weight,
@@ -357,111 +325,29 @@ class MoEFSCILNeckMLP(BaseModule):
         )
 
         self.moe.debug_enabled = True
-        self.moe.forward_count = 0 
+        self.moe.forward_count = 0
         
-        # 초기화 플래그 추가
-        self._weights_initialized = False
-        
-    def init_weights(self):
-        """Initialize weights with proper scaling for MoE and multi-scale adapters."""
-        # 이미 초기화되었으면 스킵
-        if self._weights_initialized:
-            return
-            
-        self.logger.info("🔧 Initializing MoE-FSCIL Neck (MLP) weights with default initialization...")
-        
-        if self.use_multi_scale_skip:
-            for i, adapter in enumerate(self.multi_scale_adapters):
-
-                if hasattr(adapter, 'mlp_proj'):
-                    # mlp_proj는 단일 Conv2d 레이어이므로 직접 접근
-                    if isinstance(adapter.mlp_proj, nn.Conv2d):
-                        nn.init.kaiming_normal_(adapter.mlp_proj.weight, mode='fan_out', nonlinearity='relu')
-                
-                self.logger.info(f'Initialized MultiScaleAdapter {i} for channel {self.multi_scale_channels[i]} with 1x1 conv')
-        
-        
-        # 초기화 완료 플래그 설정
-        self._weights_initialized = True
     
-    def forward(self, x, multi_scale_features=None):
-
+    def forward(self, x):
+        # Handle tuple input (e.g., from backbone with multiple outputs)
         if isinstance(x, tuple):
-            x = x[-1]  # layer4 as main input
-            if self.use_multi_scale_skip and multi_scale_features is None and len(x) > 1:
-                multi_scale_features = x[:-1]  # [layer1, layer2, layer3]
-        
-        # multi_scale_features가 없으면 오류 발생 (multi-scale 사용시에만)
-        if self.use_multi_scale_skip and (multi_scale_features is None or len(multi_scale_features) == 0):
-            raise ValueError('use_multi_scale_skip=True 인데 multi_scale_features가 없습니다. backbone에서 여러 레이어 출력을 반환하도록 설정하세요.')
+            x = x[-1]  # Use last layer (layer4) as main input
 
         B, C, H, W = x.shape
-        identity = x
         outputs = {}
         
-        x_proj = identity  # Identity mapping - 채널 수가 동일하므로 그대로 사용
-        x_proj = x_proj.permute(0, 2, 3, 1).view(B, H * W, -1)  # [B, H*W, out_channels]
-        
-        x_proj = x_proj + self.pos_embed  # [B, H*W, out_channels]
-        
+        # Prepare input for MoE
+        x_proj = x.permute(0, 2, 3, 1).view(B, H * W, -1)  # [B, H*W, out_channels]
+        x_proj = x_proj + self.pos_embed  # Add positional embedding
         x_spatial = x_proj.view(B, H, W, -1)  # [B, H, W, out_channels]
 
-        moe_output, aux_loss = self.moe(x_spatial)
-
-        final_output = moe_output
-
-        skip_features_spatial = [identity] if self.use_multi_scale_skip else None  # 공간 정보 유지
-
-        if self.use_multi_scale_skip and skip_features_spatial is not None:
-            if multi_scale_features is not None:
-                for i, feat in enumerate(multi_scale_features):
-                    if i < len(self.multi_scale_adapters):
-                        adapted_feat = self.multi_scale_adapters[i](feat)  # (B, out_channels, H, W)
-                        skip_features_spatial.append(adapted_feat)
-
-                        if hasattr(self, 'logger') and torch.rand(1).item() < 0.01:  # 1% 확률로 로그
-                            self.logger.info(f"MultiScaleAdapter {i}: {feat.shape} → {adapted_feat.shape}")
-
-        if self.use_multi_scale_skip and skip_features_spatial is not None and len(skip_features_spatial) > 1:
-            # 모든 skip features는 이미 동일한 공간 크기 (MultiScaleAdapter에서 맞춤)
-            B, C, H, W = skip_features_spatial[0].shape  # 기준 크기 (identity)
-            
-            skip_stack = torch.stack(skip_features_spatial, dim=1)  # [B, N, C, H, W]
-            
-            # 하드코딩된 균등 가중치 사용 (연산량 절감)
-            num_features = len(skip_features_spatial)
-            weights = torch.full((B, num_features), 1.0 / num_features, device=skip_stack.device, dtype=skip_stack.dtype)  # [B, N]
-            
-            # Skip features에 가중치 적용 (공간 정보 유지)
-            weighted_skip = (weights.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1) * skip_stack).sum(dim=1)  # [B, C, H, W]
-            
-            # Simple pooling instead of SS2D for skip features
-            weighted_skip_pooled = F.adaptive_avg_pool2d(weighted_skip, (1, 1)).view(B, -1)  # [B, C]
-            
-            # 최종 출력: MoE + pooled skip connections
-            final_output = moe_output + 0.1 * weighted_skip_pooled
-            
-            # 디버깅: 하드코딩된 균등 가중치 출력
-            if hasattr(self, 'logger') and torch.rand(1).item() < 0.01:  # 1% 확률로 로그
-                weight_values = weights[0].detach().cpu().numpy()
-                # Generate dynamic feature names based on actual skip features
-                feature_names = ['layer4']
-                if self.use_multi_scale_skip:
-                    feature_names.extend([f'layer{i+1}' for i in range(len(self.multi_scale_channels))])
-                feature_names = feature_names[:len(skip_features_spatial)]
-                weight_info = ', '.join([f"{name}: {val:.3f}" for name, val in zip(feature_names, weight_values)])
-                self.logger.info(f"Hard-coded uniform weights: {weight_info}")
-        else:
-            final_output = moe_output
+        # MoE processing
+        moe_output, moe_aux_loss = self.moe(x_spatial)
         
         # Prepare outputs
-        outputs.update({
-            'out': final_output,
-            'aux_loss': aux_loss,
-            'main': moe_output,
-        })
-
-        if self.use_multi_scale_skip and skip_features_spatial is not None:
-            outputs['skip_features'] = skip_features_spatial
+        outputs = {
+            'out': moe_output,
+            'aux_loss': moe_aux_loss,
+        }
         
         return outputs
