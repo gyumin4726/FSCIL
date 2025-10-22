@@ -63,6 +63,6 @@ lr_config = dict(
     warmup_ratio=0.1,
     warmup_by_epoch=False)
 
-runner = dict(type='EpochBasedRunner', max_epochs=30)
+runner = dict(type='EpochBasedRunner', max_epochs=20)
 
 find_unused_parameters = True
