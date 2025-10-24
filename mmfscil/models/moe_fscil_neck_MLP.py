@@ -46,8 +46,6 @@ class FSCILGate(nn.Module):
         self.expert_queries = nn.Parameter(torch.randn(num_experts, dim))
         nn.init.xavier_uniform_(self.expert_queries)
         
-
-        
     def forward(self, x: torch.Tensor):
         """
         Self-attention + Cross-attention based gating
@@ -58,8 +56,9 @@ class FSCILGate(nn.Module):
             x: Input spatial features [B, H, W, dim]
             
         Returns:
-            gate_scores: Expert selection scores [B, num_experts]
             aux_loss: Load balancing loss
+            top_k_indices: Selected expert indices [B, top_k]
+            top_k_scores: Selected expert scores [B, top_k]
         """
         B, H, W, dim = x.shape
         
@@ -96,12 +95,8 @@ class FSCILGate(nn.Module):
         current_top_k = self.top_k if self.training else self.eval_top_k
         top_k_scores, top_k_indices = raw_gate_scores.topk(current_top_k, dim=-1)  # [B, top_k]
         
-        # Create sparsity mask
-        mask = torch.zeros_like(raw_gate_scores).scatter_(1, top_k_indices, 1)
-        masked_gate_scores = raw_gate_scores * mask
-        
-        # Normalize gate scores
-        gate_scores = masked_gate_scores 
+        # Create sparsity mask for auxiliary loss calculation
+        mask = torch.zeros_like(raw_gate_scores).scatter_(1, top_k_indices, 1) 
         
         # Step 8: Compute auxiliary loss for load balancing
         aux_loss = None
@@ -116,7 +111,7 @@ class FSCILGate(nn.Module):
             # Official Switch Transformer load balancing loss
             aux_loss = self.aux_loss_weight * (importance * load).mean() * (self.num_experts ** 2)
         
-        return gate_scores, aux_loss
+        return aux_loss, top_k_indices, top_k_scores
     
 
 
@@ -202,11 +197,7 @@ class MoEFSCIL(nn.Module):
         B, H, W, dim = x.shape
         
         # Pass spatial information directly to gate for spatial-aware routing
-        gate_scores, aux_loss = self.gate(x)  # [B, num_experts] - x is [B, H, W, dim]
-        
-        # Find top-k experts for each token (학습/평가 모드에 따라 다른 top_k 사용)
-        current_top_k = self.top_k if self.training else self.eval_top_k
-        top_k_scores, top_k_indices = gate_scores.topk(current_top_k, dim=-1)  # [B, top_k]
+        aux_loss, top_k_indices, top_k_scores = self.gate(x)  # [B, num_experts] - x is [B, H, W, dim]
         
         # 가중치 정규화: 선택된 experts의 가중치 합이 1이 되도록
         top_k_scores = F.softmax(top_k_scores, dim=-1)  # [B, top_k]
@@ -262,6 +253,7 @@ class MoEFSCIL(nn.Module):
         mixed_output = torch.zeros(B, dim, device=x.device, dtype=x.dtype)
         
         # Process only selected experts (sparse activation)
+        current_top_k = top_k_indices.shape[1]  # Get top_k from the shape
         for i in range(B):  # For each sample in batch
             for k in range(current_top_k):  # For each selected expert
                 expert_idx = top_k_indices[i, k].item()
@@ -326,7 +318,6 @@ class MoEFSCILNeckMLP(BaseModule):
 
         self.moe.debug_enabled = True
         self.moe.forward_count = 0
-        
     
     def forward(self, x):
         # Handle tuple input (e.g., from backbone with multiple outputs)
@@ -337,9 +328,9 @@ class MoEFSCILNeckMLP(BaseModule):
         outputs = {}
         
         # Prepare input for MoE
-        x_proj = x.permute(0, 2, 3, 1).view(B, H * W, -1)  # [B, H*W, out_channels]
-        x_proj = x_proj + self.pos_embed  # Add positional embedding
-        x_spatial = x_proj.view(B, H, W, -1)  # [B, H, W, out_channels]
+        x_flat = x.permute(0, 2, 3, 1).view(B, H * W, -1)  # [B, H*W, out_channels]
+        x_with_pos = x_flat + self.pos_embed  # Add positional embedding
+        x_spatial = x_with_pos.view(B, H, W, -1)  # [B, H, W, out_channels]
 
         # MoE processing
         moe_output, moe_aux_loss = self.moe(x_spatial)
