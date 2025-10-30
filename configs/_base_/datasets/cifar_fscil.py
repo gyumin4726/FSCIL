@@ -1,5 +1,5 @@
-img_size = 84
-_img_resize_size = 96
+img_size = 168
+_img_resize_size = 192
 img_norm_cfg = dict(mean=[129.304, 124.070, 112.434],
                     std=[68.170, 65.392, 70.418],
                     to_rgb=False)
@@ -23,7 +23,7 @@ test_pipeline = [
     dict(type='Collect', keys=['img', 'gt_label'], meta_keys=meta_keys)
 ]
 
-data = dict(samples_per_gpu=128,
+data = dict(samples_per_gpu=64,
             workers_per_gpu=1,
             train_dataloader=dict(persistent_workers=True, ),
             val_dataloader=dict(persistent_workers=True, ),

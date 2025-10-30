@@ -23,7 +23,7 @@ model = dict(backbone=dict(type='VMambaBackbone',
                        eval_top_k=4,
                        in_channels=1024,
                        out_channels=1024,
-                       feat_size=3,
+                       feat_size=6,
                        use_aux_loss=False,
                        aux_loss_weight=0.01),
              head=dict(type='ETFHead',
@@ -35,9 +35,9 @@ model = dict(backbone=dict(type='VMambaBackbone',
              mixup=0.5,
              mixup_prob=0.75)
 
-copy_list = (1, 1, 1, 1, 1, 1, 1, 1, None, None)
-step_list = (200, 200, 200, 200, 200, 200, 200, 200, None, None)
-
+base_copy_list = (1, 1, 2, 2, 3, 3, 2, 2, None, None)
+copy_list = (10, 10, 10, 10, 10, 10, 10, 10, None, None)
+step_list = (200, 210, 220, 230, 240, 250, 260, 270, None, None)
 finetune_lr = 0.25
 
 # optimizer
@@ -47,10 +47,7 @@ optimizer = dict(type='SGD',
                  weight_decay=0.0005,
                  paramwise_cfg=dict(
                      custom_keys={
-                         # 기본 컴포넌트들
                          'neck.pos_embed': dict(lr_mult=0.8),
-                         
-                         # MoE 컴포넌트들
                          'neck.moe.gate': dict(lr_mult=0.8),     
                          'neck.moe.experts': dict(lr_mult=0.8),  
                      }))
