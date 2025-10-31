@@ -71,124 +71,171 @@ def try_thop_flops_component(component: nn.Module, input_shape: Tuple[int, ...],
             return None, None
 
 
-def analyze_moe_flops(neck: nn.Module, input_shape: Tuple[int, ...]) -> Dict[str, int]:
-    """MoE Neck의 Train/Eval 모드별 FLOPs를 추정합니다."""
-    flops_info = {
-        'router': 0,
-        'single_expert': 0,
-        'train': 0,
-        'eval': 0
+def estimate_neck_flops_from_structure(
+    neck: nn.Module, 
+    seq_len: int, 
+    train_top_k: int = None, 
+    eval_top_k: int = None,
+    num_experts: int = None
+) -> Dict[str, int]:
+    """Neck 구조를 분석하여 FLOPs를 추정합니다."""
+    
+    result = {
+        'neck_train': 0,
+        'neck_eval': 0,
+        'estimation_method': 'structure_based'
     }
     
-    if not hasattr(neck, 'moe'):
-        return flops_info
+    total_flops = 0
+    expert_flops = 0
+    router_flops = 0
     
-    moe = neck.moe
+    # 각 컴포넌트별로 FLOPs 추정
+    for name, module in neck.named_children():
+        module_flops = 0
+        
+        # Linear layers
+        if isinstance(module, nn.Linear):
+            # FLOPs = 2 * input_dim * output_dim * batch * seq_len
+            # (2는 곱셈과 덧셈)
+            module_flops = 2 * module.in_features * module.out_features * seq_len
+        
+        # 서브모듈 재귀적으로 계산
+        for sub_name, sub_module in module.named_modules():
+            if isinstance(sub_module, nn.Linear):
+                module_flops += 2 * sub_module.in_features * sub_module.out_features * seq_len
+            elif isinstance(sub_module, nn.MultiheadAttention):
+                # Attention FLOPs = 4 * seq_len * dim * dim + 2 * seq_len^2 * dim
+                embed_dim = sub_module.embed_dim
+                # Q, K, V projections
+                module_flops += 3 * (2 * seq_len * embed_dim * embed_dim)
+                # Attention scores: Q @ K^T
+                module_flops += 2 * seq_len * seq_len * embed_dim
+                # Attention output: Attn @ V
+                module_flops += 2 * seq_len * seq_len * embed_dim
+                # Output projection
+                module_flops += 2 * seq_len * embed_dim * embed_dim
+            elif isinstance(sub_module, nn.LayerNorm):
+                # LayerNorm FLOPs = 2 * normalized_shape * seq_len
+                if hasattr(sub_module, 'normalized_shape'):
+                    norm_size = np.prod(sub_module.normalized_shape)
+                    module_flops += 2 * norm_size * seq_len
+            elif isinstance(sub_module, nn.Conv2d):
+                # Conv2D FLOPs = 2 * kernel_h * kernel_w * in_ch * out_ch * out_h * out_w
+                k_h, k_w = sub_module.kernel_size if isinstance(sub_module.kernel_size, tuple) else (sub_module.kernel_size, sub_module.kernel_size)
+                module_flops += 2 * k_h * k_w * sub_module.in_channels * sub_module.out_channels * seq_len
+        
+        # Expert인지 확인 (ModuleList나 이름에 'expert'가 포함)
+        if 'expert' in name.lower() and isinstance(module, nn.ModuleList):
+            # Expert FLOPs는 별도로 저장 (활성화 비율 계산용)
+            if len(module) > 0:
+                single_expert_flops = sum(
+                    2 * m.in_features * m.out_features * seq_len 
+                    for m in module[0].modules() if isinstance(m, nn.Linear)
+                )
+                expert_flops = single_expert_flops * len(module)
+                module_flops = expert_flops  # 일단 전체 expert flops 저장
+        elif 'gate' in name.lower() or 'router' in name.lower():
+            # Router FLOPs는 항상 사용됨
+            router_flops = module_flops
+        
+        total_flops += module_flops
     
-    # Router FLOPs 추정 (Self-Attention + Cross-Attention + Projection)
-    # 입력: [B, H*W, dim]
-    B = 1
-    H, W = 7, 7  # 일반적인 feature map 크기
+    # Position embedding 처리
+    for param_name, param in neck.named_parameters(recurse=False):
+        if 'pos_embed' in param_name:
+            # Position embedding addition: seq_len * embed_dim
+            total_flops += param.numel()
+    
+    # MoE의 경우 활성 expert 비율 고려
+    if num_experts and train_top_k and eval_top_k and expert_flops > 0:
+        single_expert_flops = expert_flops / num_experts
+        
+        # Router + 활성 experts
+        train_active_flops = router_flops + single_expert_flops * train_top_k
+        eval_active_flops = router_flops + single_expert_flops * eval_top_k
+        
+        # 나머지 컴포넌트 (pos_embed 등) 추가
+        other_flops = total_flops - expert_flops - router_flops
+        
+        result['neck_train'] = int(train_active_flops + other_flops)
+        result['neck_eval'] = int(eval_active_flops + other_flops)
+        result['expert_flops'] = int(single_expert_flops)
+        result['router_flops'] = int(router_flops)
+    else:
+        # MoE가 아닌 경우 모든 파라미터 사용
+        result['neck_train'] = int(total_flops)
+        result['neck_eval'] = int(total_flops)
+    
+    return result
+
+
+def analyze_moe_flops(neck: nn.Module, input_shape: Tuple[int, ...]) -> Dict[str, int]:
+    """MoE Neck의 Train/Eval 모드별 FLOPs를 추정합니다 (일반적인 방식)."""
+    flops_info = {
+        'neck_train': 0,
+        'neck_eval': 0,
+        'estimation_method': 'parameter_based'
+    }
+    
+    # 입력 크기로부터 feature map 크기 추정
+    C, H, W = input_shape
     seq_len = H * W
-    dim = getattr(moe, 'dim', 1024)
-    num_heads = 8
-    num_experts = getattr(moe, 'num_experts', 4)
     
-    # Self-Attention FLOPs: Q, K, V projections + attention + output projection
-    # QKV projection: 3 * (seq_len * dim * dim)
-    # Attention: seq_len * seq_len * dim
-    # Output projection: seq_len * dim * dim
-    self_attn_flops = 3 * seq_len * dim * dim + seq_len * seq_len * dim + seq_len * dim * dim
+    # Neck의 top_k 정보 찾기
+    train_top_k = None
+    eval_top_k = None
+    num_experts = None
     
-    # Cross-Attention FLOPs (Query=features, Key&Value=expert_queries)
-    # Q projection: seq_len * dim * dim
-    # K, V projections: num_experts * dim * dim
-    # Attention: seq_len * num_experts * dim
-    # Output projection: seq_len * dim * dim
-    cross_attn_flops = seq_len * dim * dim + 2 * num_experts * dim * dim + seq_len * num_experts * dim + seq_len * dim * dim
+    for name, module in neck.named_modules():
+        if hasattr(module, 'top_k'):
+            train_top_k = module.top_k
+        if hasattr(module, 'eval_top_k'):
+            eval_top_k = module.eval_top_k
+        if hasattr(module, 'num_experts'):
+            num_experts = module.num_experts
     
-    # Gate projection: num_experts * dim
-    gate_proj_flops = num_experts * dim
-    
-    flops_info['router'] = self_attn_flops + cross_attn_flops + gate_proj_flops
-    
-    # Single Expert FLOPs 추정 (SS2D는 매우 복잡함)
-    if hasattr(moe, 'experts') and len(moe.experts) > 0:
-        expert = moe.experts[0]
-        if hasattr(expert, 'ss2d_block'):
-            ss2d = expert.ss2d_block
-            
-            # SS2D 파라미터 추출
-            d_model = dim
-            ssm_ratio = getattr(ss2d, 'ssm_ratio', 2.0) if hasattr(ss2d, 'ssm_ratio') else 2.0
-            d_expand = int(ssm_ratio * d_model)
-            d_state = getattr(ss2d, 'd_state', 16) if hasattr(ss2d, 'd_state') else 16
-            dt_rank = getattr(ss2d, 'dt_rank', d_model // 16) if hasattr(ss2d, 'dt_rank') else d_model // 16
-            K = getattr(ss2d, 'K', 4) if hasattr(ss2d, 'K') else 4  # 방향 개수 (h, h_flip, v, v_flip)
-            d_conv = getattr(ss2d, 'd_conv', 3) if hasattr(ss2d, 'd_conv') else 3
-            
-            seq_len = H * W
-            
-            # 1. Input projection: d_model → 2*d_expand
-            in_proj_flops = seq_len * d_model * (2 * d_expand)
-            
-            # 2. Convolution (depthwise): d_expand channels, kernel_size=d_conv
-            if d_conv > 1:
-                conv_flops = seq_len * d_expand * (d_conv * d_conv)
-            else:
-                conv_flops = 0
-            
-            # 3. x_proj: d_inner → (dt_rank + d_state*2) for K directions
-            d_inner = d_expand  # low rank인 경우 다를 수 있음
-            x_proj_output_dim = dt_rank + d_state * 2
-            x_proj_flops = K * seq_len * d_inner * x_proj_output_dim
-            
-            # 4. dt_proj: dt_rank → d_inner for K directions
-            dt_proj_flops = K * seq_len * dt_rank * d_inner
-            
-            # 5. Selective Scan (가장 복잡한 부분!)
-            # 각 방향마다 sequence를 따라 state update 수행
-            # State update: d_inner * d_state * seq_len (per direction)
-            # Total for K directions
-            selective_scan_flops = K * d_inner * d_state * seq_len * 6  # 대략적 연산 복잡도
-            
-            # 6. Output projection (if used): d_expand → d_model
-            out_proj_flops = seq_len * d_expand * d_model if getattr(ss2d, 'use_out_proj', True) else 0
-            
-            # 7. Layer Norm
-            layer_norm_flops = seq_len * d_inner * 2
-            
-            # 8. Average Pooling (Expert의 마지막)
-            avg_pool_flops = H * W * dim
-            
-            # 총합
-            expert_flops = (in_proj_flops + conv_flops + x_proj_flops + dt_proj_flops + 
-                          selective_scan_flops + out_proj_flops + layer_norm_flops + avg_pool_flops)
-            
-            flops_info['single_expert'] = expert_flops
-            
-            # 디버깅용 세부 정보 저장
-            flops_info['expert_details'] = {
-                'in_proj': in_proj_flops,
-                'conv': conv_flops,
-                'x_proj': x_proj_flops,
-                'dt_proj': dt_proj_flops,
-                'selective_scan': selective_scan_flops,
-                'out_proj': out_proj_flops,
-                'layer_norm': layer_norm_flops,
-                'avg_pool': avg_pool_flops
-            }
+    # thop으로 시도
+    try:
+        from thop import profile
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        neck_copy = neck.to(device)
+        neck_copy.eval()
+        
+        dummy_input = torch.randn(1, C, H, W).to(device)
+        
+        # Eval 모드 FLOPs
+        with torch.no_grad():
+            eval_flops, _ = profile(neck_copy, inputs=(dummy_input,), verbose=False)
+        
+        flops_info['neck_eval'] = int(eval_flops)
+        
+        # Train 모드 FLOPs (MoE가 있고 top_k가 다른 경우)
+        if train_top_k and eval_top_k and train_top_k != eval_top_k:
+            # top_k 비율로 추정
+            ratio = train_top_k / eval_top_k if eval_top_k > 0 else 1
+            flops_info['neck_train'] = int(eval_flops * ratio)
         else:
-            # SS2D가 없는 경우 기본 추정
-            expert_flops = dim * H * W * 100
-            flops_info['single_expert'] = expert_flops
+            flops_info['neck_train'] = flops_info['neck_eval']
+        
+        flops_info['estimation_method'] = 'thop'
+        
+    except Exception as e:
+        # thop 실패 시 파라미터 기반 추정
+        print(f"  💡 FLOPs 직접 계산 실패, 파라미터 기반 추정 사용: {e}")
+        
+        # 더 정확한 FLOPs 추정
+        flops_info.update(estimate_neck_flops_from_structure(
+            neck, seq_len, train_top_k, eval_top_k, num_experts
+        ))
     
-    # Train/Eval FLOPs
-    train_top_k = getattr(moe, 'top_k', 2)
-    eval_top_k = getattr(moe, 'eval_top_k', 1)
-    
-    flops_info['train'] = flops_info['router'] + flops_info['single_expert'] * train_top_k
-    flops_info['eval'] = flops_info['router'] + flops_info['single_expert'] * eval_top_k
+    # MoE 정보 추가
+    if train_top_k is not None:
+        flops_info['train_top_k'] = train_top_k
+    if eval_top_k is not None:
+        flops_info['eval_top_k'] = eval_top_k
+    if num_experts is not None:
+        flops_info['num_experts'] = num_experts
     
     return flops_info
 
@@ -235,71 +282,63 @@ def analyze_components_flops(model, input_shape: Tuple[int, ...] = (3, 224, 224)
             else:
                 print(f"  ⚠️ Neck 입력 크기 (기본값): {backbone_output_shape}")
     
-    # Neck 분석 (MoE는 특별 처리)
+    # Neck 분석
     if hasattr(model, 'neck') and model.neck is not None:
         print(f"\n🔗 Neck: {type(model.neck).__name__}")
         print("-" * 40)
         try:
             actual_params = sum(p.numel() for p in model.neck.parameters())
+            print(f"  🔢 파라미터:         {format_number(actual_params):>12}")
             
-            # MoE Neck인 경우 Train/Eval 별도 FLOPs 계산
-            if 'MoE' in type(model.neck).__name__:
-                print(f"  💡 MoE Neck은 Train/Eval 모드별로 FLOPs가 다릅니다")
-                moe_flops = analyze_moe_flops(model.neck, backbone_output_shape)
-                
-                print(f"  🔢 파라미터:         {format_number(actual_params):>12}")
-                print(f"\n  📊 Router FLOPs:     {format_number(moe_flops['router']):>12}")
-                print(f"  📊 Single Expert:    {format_number(moe_flops['single_expert']):>12}")
-                
-                # Expert 세부 FLOPs 출력 (있는 경우)
-                if 'expert_details' in moe_flops:
-                    details = moe_flops['expert_details']
-                    print(f"     ├─ Input Proj:       {format_number(details['in_proj']):>10}")
-                    print(f"     ├─ Conv2D:           {format_number(details['conv']):>10}")
-                    print(f"     ├─ X Projection:     {format_number(details['x_proj']):>10}")
-                    print(f"     ├─ DT Projection:    {format_number(details['dt_proj']):>10}")
-                    print(f"     ├─ Selective Scan:   {format_number(details['selective_scan']):>10} 👈 핵심!")
-                    print(f"     ├─ Output Proj:      {format_number(details['out_proj']):>10}")
-                    print(f"     ├─ Layer Norm:       {format_number(details['layer_norm']):>10}")
-                    print(f"     └─ Avg Pool:         {format_number(details['avg_pool']):>10}")
-                
-                print(f"\n  ⚡ Train FLOPs:      {format_number(moe_flops['train']):>12} (top-k experts)")
-                print(f"  ⚡ Eval FLOPs:       {format_number(moe_flops['eval']):>12} (top-k experts)")
-                
-                neck_train_flops = moe_flops['train']
-                neck_eval_flops = moe_flops['eval']
-                total_params += actual_params
-            else:
-                # 일반 Neck
-                neck_input_shape = backbone_output_shape
-                neck_flops, thop_params = try_thop_flops_component(model.neck, neck_input_shape, "Neck")
-                
-                if neck_flops is not None:
-                    print(f"  📊 FLOPs:      {format_number(neck_flops):>12}")
-                    print(f"  🔢 파라미터:    {format_number(actual_params):>12}")
-                    total_flops += neck_flops
-                    total_params += actual_params
-                    neck_train_flops = neck_eval_flops = neck_flops
-                else:
-                    print("  ❌ FLOPs 계산 실패")
-                    print(f"  🔢 파라미터:    {format_number(actual_params):>12}")
-                    total_params += actual_params
+            # FLOPs 분석
+            moe_flops = analyze_moe_flops(model.neck, backbone_output_shape)
+            
+            print(f"  📊 추정 방법:        {moe_flops.get('estimation_method', 'unknown')}")
+            print(f"  ⚡ Train FLOPs:      {format_number(moe_flops['neck_train']):>12}")
+            print(f"  ⚡ Eval FLOPs:       {format_number(moe_flops['neck_eval']):>12}")
+            
+            # 세부 FLOPs 정보 (structure_based 추정인 경우)
+            if moe_flops.get('estimation_method') == 'structure_based':
+                if 'router_flops' in moe_flops:
+                    print(f"\n  📊 세부 FLOPs:")
+                    print(f"     ├─ Router:          {format_number(moe_flops['router_flops']):>12}")
+                    if 'expert_flops' in moe_flops:
+                        print(f"     └─ Single Expert:   {format_number(moe_flops['expert_flops']):>12}")
+            
+            # MoE 정보가 있으면 출력
+            if 'train_top_k' in moe_flops or 'eval_top_k' in moe_flops:
+                print(f"\n  💡 MoE 설정:")
+                if 'num_experts' in moe_flops:
+                    print(f"     ├─ Experts: {moe_flops['num_experts']}")
+                if 'train_top_k' in moe_flops:
+                    print(f"     ├─ Train top-k: {moe_flops['train_top_k']}")
+                if 'eval_top_k' in moe_flops:
+                    print(f"     └─ Eval top-k: {moe_flops['eval_top_k']}")
+            
+            neck_train_flops = moe_flops['neck_train']
+            neck_eval_flops = moe_flops['neck_eval']
+            total_params += actual_params
+            
         except Exception as e:
             print(f"  ❌ FLOPs 계산 실패: {e}")
+            import traceback
+            traceback.print_exc()
     
     # Head 분석 (ETFHead는 파라미터가 없으므로 생략)
     # ETFHead는 고정된 ETF classifier로 학습 가능한 파라미터가 없음
 
-    if neck_train_flops > 0:
+    if neck_train_flops > 0 or neck_eval_flops > 0:
         print(f"\n🏆 Neck FLOPs 요약")
         print("=" * 60)
         
         print(f"  📊 Train FLOPs (Neck): {format_number(neck_train_flops):>12}")
         print(f"  📊 Eval FLOPs (Neck):  {format_number(neck_eval_flops):>12}")
         
-        flops_reduction = neck_train_flops - neck_eval_flops
-        reduction_ratio = (flops_reduction / neck_train_flops * 100) if neck_train_flops > 0 else 0
-        print(f"\n  💡 Eval FLOPs 절감:   {format_number(flops_reduction):>12} ({reduction_ratio:.1f}% 감소)")
+        if neck_train_flops != neck_eval_flops and neck_eval_flops > 0:
+            flops_reduction = neck_train_flops - neck_eval_flops
+            reduction_ratio = (flops_reduction / neck_train_flops * 100) if neck_train_flops > 0 else 0
+            print(f"  💡 Eval FLOPs 절감:   {format_number(flops_reduction):>12} ({reduction_ratio:.1f}% 감소)")
+        
         print(f"  🔢 총 파라미터:        {format_number(total_params):>12}")
     
     return total_flops, total_params
@@ -330,60 +369,82 @@ def analyze_model_components(model: nn.Module) -> Dict[str, Dict[str, int]]:
     return component_stats
 
 
-def analyze_moe_neck(neck: nn.Module) -> Dict[str, Any]:
-    """MoE Neck의 세부 구조를 분석합니다."""
-    stats = {
-        'total_params': sum(p.numel() for p in neck.parameters()),
-        'components': {}
+def get_module_tree(module: nn.Module, max_depth: int = 5, current_depth: int = 0) -> Dict[str, Any]:
+    """모듈을 재귀적으로 분석하여 트리 구조로 반환합니다."""
+    if current_depth >= max_depth:
+        return None
+    
+    # 직속 파라미터 (서브모듈 제외)
+    direct_params = sum(p.numel() for p in module.parameters(recurse=False))
+    total_params = sum(p.numel() for p in module.parameters())
+    
+    result = {
+        'total_params': total_params,
+        'direct_params': direct_params,
+        'type': type(module).__name__,
+        'children': {}
     }
     
-    # MoE 모듈 분석
-    if hasattr(neck, 'moe'):
-        moe = neck.moe
-        
-        # Gate (Router) 분석
-        if hasattr(moe, 'gate'):
-            gate_params = sum(p.numel() for p in moe.gate.parameters())
-            stats['components']['gate_router'] = gate_params
-            
-            # Gate 내부 세부 분석
-            gate_details = {}
-            if hasattr(moe.gate, 'spatial_self_attention'):
-                gate_details['self_attention'] = sum(p.numel() for p in moe.gate.spatial_self_attention.parameters())
-            if hasattr(moe.gate, 'expert_cross_attention'):
-                gate_details['cross_attention'] = sum(p.numel() for p in moe.gate.expert_cross_attention.parameters())
-            if hasattr(moe.gate, 'expert_queries'):
-                gate_details['expert_queries'] = moe.gate.expert_queries.numel()
-            if hasattr(moe.gate, 'gate_proj'):
-                gate_details['gate_proj'] = sum(p.numel() for p in moe.gate.gate_proj.parameters())
-            
-            stats['components']['gate_details'] = gate_details
-        
-        # Experts 분석
-        if hasattr(moe, 'experts'):
-            experts = moe.experts
-            num_experts = len(experts)
-            single_expert_params = sum(p.numel() for p in experts[0].parameters()) if num_experts > 0 else 0
-            total_experts_params = sum(p.numel() for p in experts.parameters())
-            
-            stats['components']['experts'] = {
-                'num_experts': num_experts,
-                'single_expert': single_expert_params,
-                'total_experts': total_experts_params
-            }
-            
-            # Top-K 정보
-            if hasattr(moe, 'top_k') and hasattr(moe, 'eval_top_k'):
-                stats['top_k_info'] = {
-                    'train_top_k': moe.top_k,
-                    'eval_top_k': moe.eval_top_k,
-                    'train_activation_ratio': moe.top_k / num_experts,
-                    'eval_activation_ratio': moe.eval_top_k / num_experts
-                }
+    # 직속 서브모듈 분석
+    for name, child_module in module.named_children():
+        child_params = sum(p.numel() for p in child_module.parameters())
+        if child_params > 0:
+            child_tree = get_module_tree(child_module, max_depth, current_depth + 1)
+            if child_tree:
+                result['children'][name] = child_tree
     
-    # Position embedding
-    if hasattr(neck, 'pos_embed'):
-        stats['components']['pos_embed'] = neck.pos_embed.numel()
+    return result
+
+
+def print_module_tree(tree: Dict[str, Any], name: str = "root", indent: int = 0, is_last: bool = True, prefix: str = ""):
+    """모듈 트리를 보기 좋게 출력합니다."""
+    if tree is None:
+        return
+    
+    # 트리 구조 문자
+    if indent == 0:
+        connector = ""
+        next_prefix = ""
+    else:
+        connector = "└─ " if is_last else "├─ "
+        next_prefix = prefix + ("   " if is_last else "│  ")
+    
+    # 현재 노드 출력
+    total = tree['total_params']
+    direct = tree['direct_params']
+    type_name = tree['type']
+    
+    if direct > 0:
+        print(f"{prefix}{connector}{name:30} {format_number(total):>12} (직접: {format_number(direct):>10}) [{type_name}]")
+    else:
+        print(f"{prefix}{connector}{name:30} {format_number(total):>12} [{type_name}]")
+    
+    # 자식 노드 재귀 출력
+    children = list(tree['children'].items())
+    for i, (child_name, child_tree) in enumerate(children):
+        is_last_child = (i == len(children) - 1)
+        print_module_tree(child_tree, child_name, indent + 1, is_last_child, next_prefix)
+
+
+def analyze_moe_neck(neck: nn.Module) -> Dict[str, Any]:
+    """MoE Neck의 세부 구조를 분석합니다 (재귀적으로 최소 단위까지)."""
+    stats = {
+        'total_params': sum(p.numel() for p in neck.parameters()),
+        'tree': get_module_tree(neck, max_depth=5)
+    }
+    
+    # MoE 관련 정보가 있으면 추가
+    moe_info = {}
+    for name, module in neck.named_modules():
+        if hasattr(module, 'top_k'):
+            moe_info['train_top_k'] = module.top_k
+        if hasattr(module, 'eval_top_k'):
+            moe_info['eval_top_k'] = module.eval_top_k
+        if hasattr(module, 'num_experts'):
+            moe_info['num_experts'] = module.num_experts
+    
+    if moe_info:
+        stats['moe_info'] = moe_info
     
     return stats
 
@@ -407,62 +468,50 @@ def print_model_analysis(model: nn.Module, config_name: str, input_shape: Tuple[
     print("-" * 50)
     component_stats = analyze_model_components(model)
     for comp_name, stats in component_stats.items():
-        print(f"  {comp_name:12}: {format_number(stats['total']):>12} ({stats['total']:,})")
+        total_str = f"{format_number(stats['total']):>12}"
+        trainable_str = f"{format_number(stats['trainable']):>12}"
+        frozen_str = f"{format_number(stats['frozen']):>12}"
+        print(f"  {comp_name:12}: {total_str} (훈련: {trainable_str} / 고정: {frozen_str})")
     
     # MoE Neck 세부 분석
-    if hasattr(model, 'neck'):
+    if hasattr(model, 'neck') and model.neck is not None:
         moe_stats = analyze_moe_neck(model.neck)
         
-        print(f"\n🔀 MoE Neck 세부 분석:")
-        print("-" * 50)
-        print(f"  총 Neck 파라미터: {format_number(moe_stats['total_params']):>12}")
+        print(f"\n🔀 Neck 세부 분석 (재귀 트리 구조):")
+        print("-" * 80)
+        print(f"  총 Neck 파라미터: {format_number(moe_stats['total_params']):>12}\n")
         
-        if 'gate_router' in moe_stats['components']:
-            gate_params = moe_stats['components']['gate_router']
-            gate_ratio = gate_params / moe_stats['total_params'] * 100
-            print(f"\n  🎯 Router (Gate):  {format_number(gate_params):>12} ({gate_ratio:.1f}% of Neck)")
-            
-            # Gate 세부 구조
-            if 'gate_details' in moe_stats['components']:
-                details = moe_stats['components']['gate_details']
-                print(f"     ├─ Self-Attention:   {format_number(details.get('self_attention', 0)):>10}")
-                print(f"     ├─ Cross-Attention:  {format_number(details.get('cross_attention', 0)):>10}")
-                print(f"     ├─ Expert Queries:   {format_number(details.get('expert_queries', 0)):>10}")
-                print(f"     └─ Gate Projection:  {format_number(details.get('gate_proj', 0)):>10}")
+        # 트리 구조 출력
+        if 'tree' in moe_stats and moe_stats['tree']:
+            print(f"  📦 모듈 계층 구조:")
+            print()
+            # Neck 자체 출력
+            tree = moe_stats['tree']
+            print(f"  Neck                           {format_number(tree['total_params']):>12} [{tree['type']}]")
+            # 자식들 출력
+            children = list(tree['children'].items())
+            for i, (child_name, child_tree) in enumerate(children):
+                is_last = (i == len(children) - 1)
+                print_module_tree(child_tree, child_name, indent=1, is_last=is_last, prefix="  ")
         
-        if 'experts' in moe_stats['components']:
-            exp_info = moe_stats['components']['experts']
-            experts_ratio = exp_info['total_experts'] / moe_stats['total_params'] * 100
-            print(f"\n  🤖 Experts ({exp_info['num_experts']}개):   {format_number(exp_info['total_experts']):>12} ({experts_ratio:.1f}% of Neck)")
-            print(f"     └─ 단일 Expert:     {format_number(exp_info['single_expert']):>10}")
-        
-        if 'pos_embed' in moe_stats['components']:
-            pos_params = moe_stats['components']['pos_embed']
-            pos_ratio = pos_params / moe_stats['total_params'] * 100
-            print(f"\n  📍 Position Embed: {format_number(pos_params):>12} ({pos_ratio:.1f}% of Neck)")
-        
-        # Top-K 활성화 정보
-        if 'top_k_info' in moe_stats:
-            info = moe_stats['top_k_info']
-            print(f"\n  ⚡ 실제 활성화 파라미터 (Expert만 계산):")
-            print(f"     ├─ Train (top-{info['train_top_k']}): {format_number(exp_info['single_expert'] * info['train_top_k']):>10} ({info['train_activation_ratio']*100:.0f}% experts)")
-            print(f"     └─ Eval  (top-{info['eval_top_k']}): {format_number(exp_info['single_expert'] * info['eval_top_k']):>10} ({info['eval_activation_ratio']*100:.0f}% experts)")
+        # MoE 정보 출력 (있는 경우)
+        if 'moe_info' in moe_stats:
+            info = moe_stats['moe_info']
+            print(f"\n  ⚡ MoE 설정:")
+            if 'num_experts' in info:
+                print(f"     ├─ Expert 개수:     {info['num_experts']}")
+            if 'train_top_k' in info:
+                print(f"     ├─ Train Top-K:     {info['train_top_k']}")
+            if 'eval_top_k' in info:
+                print(f"     └─ Eval Top-K:      {info['eval_top_k']}")
             
-            # 전체 모델 기준 실제 활성화 파라미터
-            total_params = param_stats['total']
-            router_and_pos = gate_params + pos_params
-            active_train = router_and_pos + (exp_info['single_expert'] * info['train_top_k'])
-            active_eval = router_and_pos + (exp_info['single_expert'] * info['eval_top_k'])
-            
-            backbone_params = component_stats.get('backbone', {}).get('total', 0)
-            head_params = component_stats.get('head', {}).get('total', 0)
-            
-            print(f"\n  💡 전체 모델 기준 활성화 파라미터:")
-            print(f"     ├─ Backbone:        {format_number(backbone_params):>10}")
-            print(f"     ├─ Neck (활성화):   {format_number(active_train):>10} (Train) / {format_number(active_eval):>10} (Eval)")
-            print(f"     ├─ Head:            {format_number(head_params):>10}")
-            print(f"     ├─ Train 합계:      {format_number(backbone_params + active_train + head_params):>10}")
-            print(f"     └─ Eval  합계:      {format_number(backbone_params + active_eval + head_params):>10}")
+            # 활성화 비율 계산 (가능한 경우)
+            if all(k in info for k in ['num_experts', 'train_top_k', 'eval_top_k']):
+                train_ratio = info['train_top_k'] / info['num_experts'] * 100
+                eval_ratio = info['eval_top_k'] / info['num_experts'] * 100
+                print(f"\n  💡 Expert 활성화 비율:")
+                print(f"     ├─ Train: {train_ratio:.1f}% ({info['train_top_k']}/{info['num_experts']})")
+                print(f"     └─ Eval:  {eval_ratio:.1f}% ({info['eval_top_k']}/{info['num_experts']})")
     
     # 컴포넌트별 FLOPs 분석
     analyze_components_flops(model, input_shape)
