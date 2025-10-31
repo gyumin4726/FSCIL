@@ -166,8 +166,8 @@ class MoEFSCIL(nn.Module):
         # 가중치 정규화: 선택된 experts의 가중치 합이 1이 되도록
         top_k_scores = F.softmax(top_k_scores, dim=-1)  # [B, top_k]
         
-        # Debug: 10번째 forward마다 현재 배치, 100번째마다 누적 통계 출력
-        if hasattr(self, 'debug_enabled') and self.debug_enabled:
+        # Debug: 10번째 forward마다 현재 배치, 100번째마다 누적 통계 출력 (training 모드에서만)
+        if hasattr(self, 'debug_enabled') and self.debug_enabled and self.training:
             # Forward pass counter 증가
             if not hasattr(self, 'forward_count'):
                 self.forward_count = 0
@@ -196,8 +196,8 @@ class MoEFSCIL(nn.Module):
                 print(f"Forward #{self.forward_count:4d} | Batch Active: {active_count}/{self.num_experts} | {status_str}")
                 print("=" * 100)
             
-            # 100번째 forward마다 누적 통계 출력
-            if self.forward_count % 469 == 0 and self.total_samples > 0:
+            # 2450번째 forward마다 누적 통계 출력
+            if self.forward_count % 2450 == 0 and self.total_samples > 0:
                 cumulative_counts = self.expert_activation_counts.cpu().numpy()
                 total_samples = self.total_samples.item()
                 cumulative_ratios = cumulative_counts / total_samples if total_samples > 0 else cumulative_counts
