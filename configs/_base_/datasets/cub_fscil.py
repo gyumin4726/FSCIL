@@ -28,9 +28,9 @@ test_pipeline = [
 data = dict(
     samples_per_gpu=16,
     workers_per_gpu=1,
-    train_dataloader=dict(persistent_workers=True),
-    val_dataloader=dict(persistent_workers=True),
-    test_dataloader=dict(persistent_workers=True),
+    train_dataloader=dict(persistent_workers=False),
+    val_dataloader=dict(persistent_workers=False),
+    test_dataloader=dict(persistent_workers=False),
     train=dict(type='RepeatDataset',
                 times=1,
                 dataset=dict(
