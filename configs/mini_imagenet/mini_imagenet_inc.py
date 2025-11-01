@@ -34,7 +34,7 @@ base_copy_list = (1, 2, 3, 4, 5, 6, 7, 8, None, None)
 step_list = (100, 110, 120, 130, 140, 150, 160, 170, None, None)
 copy_list = (10, 10, 10, 10, 10, 10, 10, 10, None, None)
 
-finetune_lr = 0.01
+finetune_lr = 0.1
 
 # optimizer
 optimizer = dict(type='SGD',
@@ -43,9 +43,9 @@ optimizer = dict(type='SGD',
                  weight_decay=0.0005,
                  paramwise_cfg=dict(
                      custom_keys={
-                         'neck.pos_embed': dict(lr_mult=10.0),
-                         'neck.moe.gate': dict(lr_mult=10.0),     
-                         'neck.moe.experts': dict(lr_mult=10.0),  
+                         'neck.pos_embed': dict(lr_mult=1.0),
+                         'neck.moe.gate': dict(lr_mult=1.0),     
+                         'neck.moe.experts': dict(lr_mult=1.0),  
                      }))
 
 find_unused_parameters = True

@@ -35,10 +35,9 @@ model = dict(backbone=dict(type='VMambaBackbone',
              mixup=0.5,
              mixup_prob=0.75)
 
-base_copy_list = (1, 1, 2, 2, 3, 3, 2, 2, None, None)
-copy_list = (10, 10, 10, 10, 10, 10, 10, 10, None, None)
-step_list = (200, 210, 220, 230, 240, 250, 260, 270, None, None)
-finetune_lr = 0.25
+copy_list = (1, 1, 1, 1, 1, 1, 1, 1, None, None)
+step_list = (200, 200, 200, 200, 200, 200, 200, 200, None, None)
+finetune_lr = 0.05
 
 # optimizer
 optimizer = dict(type='SGD',
