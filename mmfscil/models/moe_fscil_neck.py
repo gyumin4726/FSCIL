@@ -248,10 +248,10 @@ class MoEFSCIL(nn.Module):
                     cumulative_status.append(f"{ratio*100:5.2f}%")
                 
                 cumulative_str = " | ".join([f"E{i}:{status}" for i, status in enumerate(cumulative_status)])
-                print("🔥" * 50)
+                print("-" * 100)
                 print(f"CUMULATIVE STATS (after {self.forward_count} forwards, {total_samples:,} samples)")
                 print(f"{cumulative_str}")
-                print("🔥" * 50)
+                print("-" * 100)
         
         # Initialize output
         mixed_output = torch.zeros(B, dim, device=x.device, dtype=x.dtype)
