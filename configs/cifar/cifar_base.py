@@ -18,14 +18,14 @@ model = dict(backbone=dict(type='VMambaBackbone',
                            frozen_stages=0,
                            channel_first=True),
              neck=dict(type='MoEFSCILNeck',
-                      num_experts=4,
-                      top_k=4,
-                      eval_top_k=4,
-                      in_channels=1024,
-                      out_channels=1024,
-                      feat_size=6,
-                      use_aux_loss=False,
-                      aux_loss_weight=0.01),
+                       num_experts=4,
+                       top_k=4,
+                       eval_top_k=4,
+                       in_channels=1024,
+                       out_channels=1024,
+                       feat_size=6,
+                       use_aux_loss=False,
+                       aux_loss_weight=0.01),
              head=dict(type='ETFHead',
                        in_channels=1024,
                        num_classes=100,
@@ -38,7 +38,7 @@ model = dict(backbone=dict(type='VMambaBackbone',
 
 optimizer = dict(
     type='SGD',
-    lr=0.1,
+    lr=0.05,
     momentum=0.9,
     weight_decay=0.0005,
     paramwise_cfg=dict(
@@ -49,5 +49,7 @@ optimizer = dict(
             'neck.moe.experts': dict(lr_mult=5.0),
         }
     ))
+
+runner = dict(type='EpochBasedRunner', max_epochs=20)
 
 find_unused_parameters = True
