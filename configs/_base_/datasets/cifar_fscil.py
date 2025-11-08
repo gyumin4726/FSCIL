@@ -1,5 +1,5 @@
-img_size = 168
-_img_resize_size = 192
+img_size = 224
+_img_resize_size = 252
 img_norm_cfg = dict(mean=[129.304, 124.070, 112.434],
                     std=[68.170, 65.392, 70.418],
                     to_rgb=False)
